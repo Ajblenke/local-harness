@@ -24,11 +24,13 @@ Status marks: `[ ]` not started, `[~]` in progress, `[x]` done.
 
 ### Phase 2: roles, pi config, telemetry `[~]`
 
-- [x] `~/.pi/agent/models.json` matches the presets (32K); Spark entries removed. The file now lives in `~/dotfiles/pi` and is stowed.
-- [ ] `settings.json`: default model, scout and researcher on LFM, oracle on Ornith
-- [ ] `~/.pi/agent/extensions/subagent/config.json`: FleetView on, artifacts in session dir
-- [ ] `pi/extensions/telemetry.ts` writes one line per turn and tool call
-- [ ] `harness status` shows loaded models, GPU, active runs
+- [x] `~/.pi/agent/models.json` matches the presets (32K); Spark entries removed. The file now lives in `~/dotfiles/pi` and is stowed. Model ids have no slashes (`qwen3.5-4b`, `lfm2.5-2.6b`, `ornith-1.5-9b`, `minicpm5-2b`).
+- [x] `settings.json`: default model `llama-cpp/qwen3.5-4b`; scout and researcher on `lfm2.5-2.6b`; oracle on `ornith-1.5-9b`
+- [x] `~/.pi/agent/extensions/subagent/config.json` symlinked from `pi/extensions/subagent-config.json`: FleetView on, artifacts in the session dir, 10 minute run and 2 minute tool timeouts
+- [x] `pi/extensions/telemetry.ts` symlinked as `~/.pi/agent/extensions/local-harness-telemetry.ts`; verified: turns, tool durations, token counts, 17.7K cached tokens per turn
+- [x] `harness status` shows loaded models, GPU, active runs
+- [ ] Decide which pi extensions a local session keeps (see the prompt cost table) and whether `pi-memory` stays
+- [ ] Verify a delegation end to end once the scout stops leaving the project directory
 
 ### Phase 3: escalation boundary `[ ]`
 
@@ -131,3 +133,6 @@ Prompt cost per extension, on top of the 1,545 baseline:
 - pi swallows a provider error in print mode: exit 0 with no output when the server rejects the request, and it hangs when the base URL is unreachable or JSON mode is used with this provider. Worth an upstream report.
 - pi clamps `max_completion_tokens` down to 1 instead of failing when the prompt exceeds the configured context window. Also worth an upstream report.
 - pi's extension set costs about 15K prompt tokens per turn on every local model. Decide which extensions a local session actually needs.
+- `pi-memory` keeps `pi -p` alive after any run that used tools: the task finishes in about 40 seconds and the process sits until killed.
+  Every other extension, alone or together, exits cleanly.
+  Until that is fixed or the package is removed, scripted runs need a timeout and delegation tests are unreliable.

@@ -1,0 +1,9 @@
+{
+  "fleetView": true,
+  "asyncWidget": true,
+  "artifactDir": "session",
+  "resultScanLogging": "activity",
+  "inlineToolDisplay": "rich",
+  "timeoutMs": 600000,
+  "toolTimeoutMs": 120000
+}

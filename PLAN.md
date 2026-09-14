@@ -104,6 +104,11 @@ pi through the router (tools on, scratch directory):
 
 Rule that follows: `contextWindow` in `~/.pi/agent/models.json` must equal the `c` value in `models.ini`, or pi silently starves the model of output tokens.
 
+First delegation through pi-subagents (main Qwen3.5, scout LFM2.5, task "list the files in the current directory and report their sizes"):
+the scout ran on the LFM instance's second slot as intended, but it treated the current directory as `/`, listed the filesystem root, then ran `find / -type f -exec ls -l {} \;` with no bound.
+The run never finished and the `find` outlived the killed pi process.
+This is the first failure card candidate for phase 5 and the reason subagents now have `toolTimeoutMs` set.
+
 Prompt cost per extension, on top of the 1,545 baseline:
 
 | Extension | Added tokens |

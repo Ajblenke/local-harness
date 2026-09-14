@@ -8,23 +8,23 @@ Status marks: `[ ]` not started, `[~]` in progress, `[x]` done.
 
 ## Phases
 
-### Phase 0: bootstrap `[~]`
+### Phase 0: bootstrap `[x]`
 
 - [x] Repo created, `harness` package, eval runner, scenarios, presets
 - [x] `llm-serve warm` loads models one at a time
-- [ ] Merge `feat/llm-router` in dotfiles and `feat/bootstrap` here
+- [x] `llm` package committed in dotfiles (branch `feat/herdr-agents`), `feat/bootstrap` here
 
-### Phase 1: pick the main model `[ ]`
+### Phase 1: pick the main model `[x]`
 
-- [ ] Download Qwen3.5-4B (UD-Q4_K_XL) and MiniCPM5-2B (Q8_0) to `~/models/`
-- [ ] Add both to `models.ini` with reasoning and sampling settings
-- [ ] Run `tool_calls` and `multi_step` with thinking on and off, on both
-- [ ] Run each through pi itself on a scratch repo
-- [ ] Record the winner and the numbers below
+- [x] Download Qwen3.5-4B (UD-Q4_K_XL) and MiniCPM5-2B (Q8_0) to `~/models/`
+- [x] Add both to `models.ini` with reasoning and sampling settings
+- [x] Run `tool_calls` and `multi_step` with thinking on and off, on both
+- [x] Run each through pi itself on a scratch repo: both create, read back, and report the file with every extension loaded (Qwen3.5 20s, MiniCPM5 28s, 17.6K prompt tokens)
+- [x] Winner: Qwen3.5-4B (decision 15). MiniCPM5-2B stays as a preset for comparison runs.
 
-### Phase 2: roles, pi config, telemetry `[ ]`
+### Phase 2: roles, pi config, telemetry `[~]`
 
-- [ ] `~/.pi/agent/models.json` matches the presets; Spark entries removed
+- [x] `~/.pi/agent/models.json` matches the presets (32K); Spark entries removed. The file now lives in `~/dotfiles/pi` and is stowed.
 - [ ] `settings.json`: default model, scout and researcher on LFM, oracle on Ornith
 - [ ] `~/.pi/agent/extensions/subagent/config.json`: FleetView on, artifacts in session dir
 - [ ] `pi/extensions/telemetry.ts` writes one line per turn and tool call
@@ -75,7 +75,8 @@ A finetune is adopted only if it scores equal or better on every scenario group.
 | 11 | 2026-09-14 | Spark-X2.5 is excluded | Its `spark2_5` architecture is unknown to llama.cpp |
 | 12 | 2026-09-14 | The qwen finetune in `~/models/qwen3-4B` is not used for agent work | It answers with `[pi.status()]` style output |
 | 13 | 2026-09-14 | Scenarios are JSON files, one per group, with canned tool results for multi step cases | A cloud proposal in phase 5 can add a scenario without touching Python |
-| 14 | 2026-09-14 | Context is 8K per model with a q8_0 KV cache | At 16K fp16, Qwen3-4B's cache alone was 3.6 GiB and a second model failed to load |
+| 14 | 2026-09-14 | Context is 32K per model with a q8_0 KV cache (was 8K) | pi's prompt with extensions is 14K to 17K tokens before any conversation; Qwen3.5, MiniCPM5, and LFM2.5 have small per token caches so 32K is affordable |
+| 15 | 2026-09-14 | Qwen3.5-4B is the main model | 11/11 on both scenario groups with thinking on and off, completed a real pi tool task, and keeps its prompt cache across turns; MiniCPM5 looped on the dead end case with thinking on |
 
 ## Measurements
 
@@ -85,6 +86,34 @@ Each entry names the run file under `~/.local/state/local-harness/runs/`.
 | Date | Model | Preset | Score | Notes |
 |---|---|---|---|---|
 | 2026-09-14 | LFM2.5-2.6B Q4_K_M | greedy | 10/11 | `20260914T101006_LiquidAI-LFM2.5-2.6B-GGUF_greedy_smoke.json`. Failed the dead end case: searched five paths and never answered. 170 tok/s. |
+| 2026-09-14 | Qwen3.5-4B UD-Q4_K_XL | greedy-no-think | 11/11 | `20260914T101238_qwen3.5-4b_greedy-no-think.json`. 93 tok/s. |
+| 2026-09-14 | Qwen3.5-4B UD-Q4_K_XL | greedy-think | 11/11 | `20260914T101247_qwen3.5-4b_greedy-think.json`. 93 tok/s, 190 to 630 chars of thinking per case. |
+| 2026-09-14 | MiniCPM5-2B Q8_0 | greedy-no-think | 10/11 | `20260914T101307_minicpm5-2b_greedy-no-think.json`. Answered the dead end case correctly ("doesn't exist"); the check wanted the word "not" and was loosened afterwards. 92 tok/s. |
+| 2026-09-14 | MiniCPM5-2B Q8_0 | greedy-think | 10/11 | `20260914T101312_minicpm5-2b_greedy-think.json`. Real failure: after the dead end it searched three more times, once with an empty pattern, and never answered. |
+
+Prompt cache with a shared system and tools prefix and a different user message: LFM2.5 reuses 0 of 98 tokens, Qwen3.5 reuses 279 of 295.
+
+pi through the router (tools on, scratch directory):
+
+| Configuration | Prompt tokens | Result |
+|---|---|---|
+| pi with all extensions and skills, 8K context | 14,433 to 17,590 | Rejected by the server. pi prints nothing and exits 0, or hangs in JSON mode. |
+| pi without extensions, with skills | 1,687 | Works |
+| pi without extensions or skills | 1,545 | Qwen3.5 created the file, read it back, reported it correctly |
+| pi with all extensions, 32K context, `models.json` still 8K | 17,590 | Model returns one token. pi clamps `max_completion_tokens` to `contextWindow` minus its prompt estimate, which bottomed out at 1. Found by proxying the request. |
+
+Rule that follows: `contextWindow` in `~/.pi/agent/models.json` must equal the `c` value in `models.ini`, or pi silently starves the model of output tokens.
+
+Prompt cost per extension, on top of the 1,545 baseline:
+
+| Extension | Added tokens |
+|---|---|
+| pi-subagents | 5,400 |
+| pi-web-access | 3,250 |
+| pi-lens | 3,070 |
+| @ff-labs/pi-fff | 1,080 |
+| pi-mcp-adapter | 1,040 |
+| @juicesharp/rpiv-ask-user-question | under 100 |
 
 ## Open items
 
@@ -94,5 +123,6 @@ Each entry names the run file under `~/.local/state/local-harness/runs/`.
   Phase 1 must measure both and decide whether pi should send `reasoning_content` back.
 - Qwen3.5 with a q8_0 KV cache is untested; its hybrid attention may behave differently.
 - pi-subagents' Claude Code adapter targets CLI 2.1.150; installed is 2.1.270.
-- pi's `models.json` still lists 128K context for models the preset serves at 8K.
-- Two Spark entries in `models.json` will error until phase 2 removes them.
+- pi swallows a provider error in print mode: exit 0 with no output when the server rejects the request, and it hangs when the base URL is unreachable or JSON mode is used with this provider. Worth an upstream report.
+- pi clamps `max_completion_tokens` down to 1 instead of failing when the prompt exceeds the configured context window. Also worth an upstream report.
+- pi's extension set costs about 15K prompt tokens per turn on every local model. Decide which extensions a local session actually needs.

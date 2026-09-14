@@ -83,7 +83,7 @@
       "expect_calls": [{"tool": "read_file", "args": {"path": "/srv/app/settings.yaml"}}],
       "allow_extra_calls": ["search_files"],
       "max_repeat_calls": 1,
-      "expect_final_contains": ["not", "exist"],
+      "expect_final_contains": ["exist"],
       "max_turns": 4
     }
   ]

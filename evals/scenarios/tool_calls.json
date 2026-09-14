@@ -1,0 +1,96 @@
+{
+  "name": "tool_calls",
+  "description": "Single turn tool selection and argument accuracy. The abstain cases matter most: over eager tool calling is the failure people notice last.",
+  "system": "You are a precise assistant. Use the provided tools when they apply. Do not invent tools.",
+  "tools": [
+    {
+      "type": "function",
+      "function": {
+        "name": "get_weather",
+        "description": "Get the current weather for a city.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "city": {"type": "string", "description": "City name, e.g. Boston"},
+            "unit": {"type": "string", "enum": ["c", "f"]}
+          },
+          "required": ["city"]
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "search_files",
+        "description": "Search files under a directory for a regular expression.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "pattern": {"type": "string"},
+            "path": {"type": "string"},
+            "max_results": {"type": "integer"}
+          },
+          "required": ["pattern", "path"]
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "convert_currency",
+        "description": "Convert an amount between two currency codes.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "amount": {"type": "number"},
+            "from_code": {"type": "string"},
+            "to_code": {"type": "string"}
+          },
+          "required": ["amount", "from_code", "to_code"]
+        }
+      }
+    }
+  ],
+  "cases": [
+    {
+      "name": "simple_call",
+      "prompt": "What is the weather in Boston?",
+      "expect_calls": [{"tool": "get_weather", "args": {"city": "Boston"}}]
+    },
+    {
+      "name": "call_with_enum",
+      "prompt": "What is the weather in Denver in Fahrenheit?",
+      "expect_calls": [{"tool": "get_weather", "args": {"city": "Denver", "unit": "f"}}]
+    },
+    {
+      "name": "numeric_argument",
+      "prompt": "Convert 250 US dollars to euros.",
+      "expect_calls": [{"tool": "convert_currency", "args": {"amount": 250, "from_code": "USD", "to_code": "EUR"}}]
+    },
+    {
+      "name": "two_required_args",
+      "prompt": "Find every use of the pattern TODO under /srv/app.",
+      "expect_calls": [{"tool": "search_files", "args": {"pattern": "TODO", "path": "/srv/app"}}]
+    },
+    {
+      "name": "tool_selection",
+      "prompt": "I need to know how much 40 pounds sterling is in yen.",
+      "expect_calls": [{"tool": "convert_currency", "args": {"amount": 40}}]
+    },
+    {
+      "name": "abstain_general_knowledge",
+      "prompt": "What is the capital of France? Answer directly.",
+      "expect_calls": []
+    },
+    {
+      "name": "abstain_no_matching_tool",
+      "prompt": "Write me a two line poem about snow.",
+      "expect_calls": []
+    },
+    {
+      "name": "ambiguous_city",
+      "prompt": "Is it raining in Portland right now?",
+      "expect_calls": [{"tool": "get_weather", "args": {"city": "Portland"}}]
+    }
+  ]
+}

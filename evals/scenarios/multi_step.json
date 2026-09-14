@@ -1,0 +1,90 @@
+{
+  "name": "multi_step",
+  "description": "Tasks that need more than one turn: use a tool result, chain two tools, and stop when a tool reports a dead end instead of retrying it.",
+  "system": "You are a coding assistant working in a repository. Use the provided tools when they apply. When a tool reports that something does not exist or cannot be done, say so and stop rather than trying the same call again.",
+  "tools": [
+    {
+      "type": "function",
+      "function": {
+        "name": "search_files",
+        "description": "Search files under a directory for a regular expression. Returns matching file paths with line numbers.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "pattern": {"type": "string"},
+            "path": {"type": "string"}
+          },
+          "required": ["pattern", "path"]
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "read_file",
+        "description": "Read a file and return its contents.",
+        "parameters": {
+          "type": "object",
+          "properties": {"path": {"type": "string"}},
+          "required": ["path"]
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "edit_file",
+        "description": "Replace one exact string in a file with another.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "path": {"type": "string"},
+            "old": {"type": "string"},
+            "new": {"type": "string"}
+          },
+          "required": ["path", "old", "new"]
+        }
+      }
+    }
+  ],
+  "cases": [
+    {
+      "name": "search_then_edit",
+      "prompt": "The constant DEFAULT_PORT in the repo at /srv/app is set to 8000. Change it to 8080.",
+      "tool_results": {
+        "search_files": "/srv/app/config.py:12: DEFAULT_PORT = 8000",
+        "read_file": "import os\n\nDEBUG = False\nDEFAULT_PORT = 8000\n",
+        "edit_file": "ok: 1 replacement made"
+      },
+      "expect_calls": [
+        {"tool": "search_files", "args": {"pattern": "DEFAULT_PORT"}},
+        {"tool": "edit_file", "args": {"path": "/srv/app/config.py", "old": "DEFAULT_PORT = 8000", "new": "DEFAULT_PORT = 8080"}}
+      ],
+      "allow_extra_calls": ["read_file"],
+      "max_turns": 5
+    },
+    {
+      "name": "summarise_tool_result",
+      "prompt": "Read /srv/app/README.md and tell me in one sentence what the project does.",
+      "tool_results": {
+        "read_file": "# ledgerd\n\nledgerd is a small daemon that watches a directory of CSV bank exports and appends normalised rows to a SQLite ledger.\n"
+      },
+      "expect_calls": [{"tool": "read_file", "args": {"path": "/srv/app/README.md"}}],
+      "expect_final_contains": ["SQLite"],
+      "max_turns": 3
+    },
+    {
+      "name": "dead_end_reported_not_retried",
+      "prompt": "Open /srv/app/settings.yaml and tell me the value of the timeout key.",
+      "tool_results": {
+        "read_file": "error: no such file: /srv/app/settings.yaml",
+        "search_files": "no matches"
+      },
+      "expect_calls": [{"tool": "read_file", "args": {"path": "/srv/app/settings.yaml"}}],
+      "allow_extra_calls": ["search_files"],
+      "max_repeat_calls": 1,
+      "expect_final_contains": ["not", "exist"],
+      "max_turns": 4
+    }
+  ]
+}

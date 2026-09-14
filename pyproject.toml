@@ -1,0 +1,28 @@
+[project]
+name = "local-harness"
+version = "0.1.0"
+description = "Private multi model agent harness for pi on local llama.cpp models"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = []
+
+[project.scripts]
+harness = "harness.cli:main"
+
+[build-system]
+requires = ["uv_build>=0.12.7,<0.13.0"]
+build-backend = "uv_build"
+
+[tool.uv.build-backend]
+module-name = "harness"
+module-root = ""
+
+[dependency-groups]
+dev = ["ruff>=0.13", "pytest>=8"]
+
+[tool.ruff]
+line-length = 110
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]

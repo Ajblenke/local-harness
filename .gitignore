@@ -1,0 +1,12 @@
+# Runtime data belongs in ~/.local/state/local-harness, never here.
+runs/
+reports/
+*.jsonl
+
+__pycache__/
+.venv/
+.ruff_cache/
+.pytest_cache/
+
+# pi subagent artifacts, if pi is ever run with artifactDir=project by mistake
+.pi/subagents/

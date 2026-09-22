@@ -1,0 +1,4 @@
+{
+  "ruff": ["uv", "run", "--no-sync", "ruff", "check", "--no-cache", "."],
+  "pytest": ["uv", "run", "--no-sync", "pytest", "-q", "-p", "no:cacheprovider"]
+}

@@ -1,0 +1,47 @@
+name: Verify
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install uv
+        uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
+        with:
+          version: "0.12.7"
+          python-version: "3.13.15"
+          enable-cache: false
+      - run: uv sync --locked --all-groups
+      - run: uv run ruff check .
+      - run: uv run ruff format --check .
+      - run: uv run pytest -q
+      - run: uv build
+      - name: Validate JSON contracts
+        run: |
+          for file in contracts/*.json contracts/examples/*.json evals/presets/*.json evals/scenarios/*.json sandbox/pi/*.json; do
+            python -m json.tool "$file" >/dev/null
+          done
+      - name: Validate sandbox definitions
+        env:
+          WORKTREE: /tmp/local-harness-worktree
+          ARTIFACTS: /tmp/local-harness-artifacts
+          MODEL_FILE: /tmp/local-harness-model.gguf
+          LOCAL_HARNESS_RUN_ID: verify
+        run: |
+          docker compose -f sandbox/compose.yaml config --quiet
+          docker compose -f sandbox/checker.compose.yaml config --quiet
+      - name: Exercise continuation contract
+        run: >-
+          uv run harness contract check
+          contracts/examples/work-order.json
+          contracts/examples/completion.json
+          contracts/examples/observation.json
+          --json

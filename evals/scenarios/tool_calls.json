@@ -10,6 +10,7 @@
         "description": "Get the current weather for a city.",
         "parameters": {
           "type": "object",
+          "additionalProperties": false,
           "properties": {
             "city": {"type": "string", "description": "City name, e.g. Boston"},
             "unit": {"type": "string", "enum": ["c", "f"]}
@@ -25,6 +26,7 @@
         "description": "Search files under a directory for a regular expression.",
         "parameters": {
           "type": "object",
+          "additionalProperties": false,
           "properties": {
             "pattern": {"type": "string"},
             "path": {"type": "string"},
@@ -41,6 +43,7 @@
         "description": "Convert an amount between two currency codes.",
         "parameters": {
           "type": "object",
+          "additionalProperties": false,
           "properties": {
             "amount": {"type": "number"},
             "from_code": {"type": "string"},

@@ -1,0 +1,15 @@
+[Unit]
+Description=Import local-harness telemetry into its private store
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/Projects/local-harness
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin
+Environment=UV_CACHE_DIR=%t/local-harness-uv
+ExecStart=/usr/bin/env uv run harness telemetry sync
+TimeoutStartSec=2m
+PrivateTmp=true
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=-%h/.local/state/local-harness

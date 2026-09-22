@@ -1,0 +1,33 @@
+{
+  "schema": "local-harness/observation/v1",
+  "run_id": "example-run",
+  "work_order_sha256": "ea8a1aa2225020130060075ab9aa8402b17edb7506432bc235fc4cae44ce6aa4",
+  "runner_id": "local-harness-runner",
+  "base_commit": "0123456789abcdef0123456789abcdef01234567",
+  "changes": [
+    {"path": "harness/controller.py", "kind": "modified"},
+    {"path": "tests/test_controller.py", "kind": "modified"}
+  ],
+  "checks": [
+    {"name": "ruff", "status": "pass", "exit_code": 0, "output_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "output_ref": "checks/00-acadbba99747.log"},
+    {"name": "pytest", "status": "pass", "exit_code": 0, "output_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "output_ref": "checks/01-2b01214d32c3.log"}
+  ],
+  "checks_isolated": true,
+  "sandbox": {
+    "kind": "docker",
+    "manifest_sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    "network": "internal",
+    "read_scope_enforced": true
+  },
+  "sandbox_violations": [],
+  "telemetry_ref": "telemetry:example-run",
+  "telemetry_complete": true,
+  "tool_calls": 12,
+  "wall_seconds": 24.5,
+  "evidence": [
+    "check:ruff",
+    "check:pytest",
+    "path:harness/controller.py",
+    "path:tests/test_controller.py"
+  ]
+}

@@ -1,0 +1,20 @@
+{
+  "schema": "local-harness/work-order/v1",
+  "run_id": "example-run",
+  "objective": "Add one tested controller behavior",
+  "base_commit": "0123456789abcdef0123456789abcdef01234567",
+  "scope": {
+    "read": ["**"],
+    "write": ["harness/**", "tests/**"],
+    "deny": ["**/secrets/**", "**/.env"]
+  },
+  "required_checks": ["ruff", "pytest"],
+  "limits": {
+    "min_changed_files": 1,
+    "max_changed_files": 4,
+    "max_tool_calls": 30,
+    "max_wall_seconds": 600
+  },
+  "approval": "human",
+  "next_step": "Present the verified change for human review"
+}

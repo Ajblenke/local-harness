@@ -1,0 +1,25 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "local-harness/observation/v1",
+  "title": "Local Harness Runner Observation v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "run_id", "work_order_sha256", "runner_id", "base_commit", "changes", "checks", "checks_isolated", "sandbox", "sandbox_violations", "telemetry_ref", "telemetry_complete", "evidence", "tool_calls", "wall_seconds"],
+  "properties": {
+    "schema": {"const": "local-harness/observation/v1"},
+    "run_id": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"},
+    "work_order_sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+    "runner_id": {"type": "string", "minLength": 1},
+    "base_commit": {"type": "string", "pattern": "^(?:[a-f0-9]{40}|[a-f0-9]{64})$"},
+    "changes": {"type": "array", "items": {"type": "object", "additionalProperties": false, "required": ["path", "kind"], "properties": {"path": {"type": "string", "minLength": 1}, "kind": {"enum": ["added", "modified", "deleted", "renamed"]}}}},
+    "checks": {"type": "array", "items": {"type": "object", "additionalProperties": false, "required": ["name", "status", "exit_code", "output_sha256", "output_ref"], "properties": {"name": {"type": "string", "minLength": 1}, "status": {"enum": ["pass", "fail"]}, "exit_code": {"type": "integer"}, "output_sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"}, "output_ref": {"type": "string", "minLength": 1}}}},
+    "checks_isolated": {"type": "boolean"},
+    "sandbox": {"type": "object", "additionalProperties": false, "required": ["kind", "manifest_sha256", "network", "read_scope_enforced"], "properties": {"kind": {"enum": ["docker", "host"]}, "manifest_sha256": {"anyOf": [{"type": "string", "pattern": "^[a-f0-9]{64}$"}, {"type": "null"}]}, "network": {"enum": ["internal", "none", "host"]}, "read_scope_enforced": {"type": "boolean"}}},
+    "sandbox_violations": {"type": "array", "items": {"type": "string", "minLength": 1}},
+    "telemetry_ref": {"type": "string", "minLength": 1},
+    "telemetry_complete": {"type": "boolean"},
+    "evidence": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}, "uniqueItems": true},
+    "tool_calls": {"type": "integer", "minimum": 0},
+    "wall_seconds": {"type": "number", "minimum": 0}
+  }
+}

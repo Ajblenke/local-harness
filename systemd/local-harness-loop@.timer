@@ -1,0 +1,10 @@
+[Unit]
+Description=Schedule one local-harness control-loop iteration for %i
+
+[Timer]
+OnCalendar=weekly
+Persistent=true
+RandomizedDelaySec=30m
+
+[Install]
+WantedBy=timers.target

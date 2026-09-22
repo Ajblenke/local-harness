@@ -1,0 +1,13 @@
+[Unit]
+Description=Run one local-harness control-loop iteration for %i
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/Projects/local-harness
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin
+Environment=UV_CACHE_DIR=%t/local-harness-uv
+EnvironmentFile=-%h/.config/local-harness/model.env
+ExecStart=/usr/bin/env uv run harness loop scheduled %h/.config/local-harness/%i.json
+TimeoutStartSec=1h
+PrivateTmp=true
+NoNewPrivileges=true

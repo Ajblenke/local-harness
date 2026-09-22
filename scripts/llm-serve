@@ -1,0 +1,390 @@
+#!/usr/bin/env bash
+# Manage a private llama.cpp router and its configured local GGUF models.
+set -euo pipefail
+umask 077
+
+LLAMA_SERVER="${LLAMA_SERVER:-$HOME/.llama-app/llama serve}"
+read -r -a SERVER_CMD <<<"$LLAMA_SERVER"
+PRESET="${LLM_PRESET:-$HOME/.config/llama-router/models.ini}"
+HOST="${LLM_HOST:-127.0.0.1}"
+PORT="${LLM_PORT:-8080}"
+MODELS_MAX="${LLM_MODELS_MAX:-1}"
+STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/llama-router"
+PID_FILE="$STATE_DIR/server.pid"
+LOG_FILE="$STATE_DIR/server.log"
+PREVIOUS_LOG="$STATE_DIR/server.previous.log"
+RENDERED_PRESET="$STATE_DIR/models.rendered.ini"
+BASE_URL="http://$HOST:$PORT"
+
+usage() {
+    cat <<EOF
+Usage: llm-serve <command> [model-id ...]
+
+  doctor         validate the binary, preset, model files, state, and endpoint
+  models         list model ids configured in models.ini
+  start          start the router in the background
+  fg             run the router in the foreground
+  stop           stop only the router process recorded in the pid file
+  restart        stop, then start
+  status         show configured router model states
+  load <id>      load one configured model and wait for completion
+  unload <id>    unload one configured model
+  warm [ids...]  load configured models serially (default: qwen3.5-4b)
+  logs           follow the current server log
+
+MODEL arguments are section ids from models.ini, not GGUF paths.
+Environment: LLM_PORT, LLM_HOST, LLM_MODELS_MAX, LLM_PRESET,
+LLAMA_SERVER, LLM_WARM_MODELS, LLM_ALLOW_REMOTE.
+EOF
+}
+
+die() {
+    echo "llm-serve: $*" >&2
+    exit 1
+}
+
+prepare_state() {
+    mkdir -p "$STATE_DIR"
+    chmod 700 "$STATE_DIR"
+}
+
+validate_host() {
+    case "$HOST" in
+        127.0.0.1 | localhost | ::1) ;;
+        *) [[ "${LLM_ALLOW_REMOTE:-0}" == "1" ]] || die \
+            "refusing non-loopback host $HOST without LLM_ALLOW_REMOTE=1" ;;
+    esac
+}
+
+validate_server() {
+    if [[ ${#SERVER_CMD[@]} -eq 0 || ! -x "${SERVER_CMD[0]}" ]]; then
+        echo "problem: server binary not found or not executable: ${SERVER_CMD[0]:-(empty)}" >&2
+        return 1
+    fi
+}
+
+preset_tool() {
+    python3 - "$PRESET" "$@" <<'PY'
+import configparser
+import json
+import os
+import pathlib
+import sys
+
+path = pathlib.Path(sys.argv[1])
+action = sys.argv[2]
+if not path.is_file():
+    raise SystemExit(f"preset not found: {path}")
+parser = configparser.ConfigParser(interpolation=None)
+parser.read_string("[router]\n" + path.read_text())
+models = {}
+for section in parser.sections():
+    if section in {"router", "*"}:
+        continue
+    raw = parser.get(section, "model", fallback="").strip()
+    expanded = pathlib.Path(os.path.expanduser(os.path.expandvars(raw))) if raw else None
+    models[section] = {"raw": raw, "path": str(expanded) if expanded else ""}
+if action == "list":
+    print("\n".join(models))
+elif action == "has":
+    raise SystemExit(0 if len(sys.argv) > 3 and sys.argv[3] in models else 1)
+elif action == "validate":
+    problems = []
+    if parser.get("router", "version", fallback="") != "1":
+        problems.append("unsupported preset version")
+    if not models:
+        problems.append("no model sections configured")
+    for model_id, item in models.items():
+        if not item["raw"]:
+            problems.append(f"{model_id}: missing model path")
+        elif not pathlib.Path(item["path"]).is_file():
+            problems.append(f"{model_id}: GGUF not found: {item['path']}")
+        context = parser.getint(model_id, "c", fallback=0)
+        slots = parser.getint(model_id, "np", fallback=parser.getint("*", "np", fallback=1))
+        if context <= 0:
+            problems.append(f"{model_id}: c must be a positive integer")
+        if slots <= 0:
+            problems.append(f"{model_id}: np must be a positive integer")
+    print(json.dumps({"models": models, "problems": problems}, indent=2))
+    raise SystemExit(1 if problems else 0)
+else:
+    raise SystemExit(f"unknown preset action: {action}")
+PY
+}
+
+configured_models() {
+    preset_tool list
+}
+
+require_model() {
+    preset_tool has "$1" || {
+        echo "llm-serve: unknown model id '$1'; configured ids:" >&2
+        configured_models | sed 's/^/  /' >&2
+        exit 2
+    }
+}
+
+render_preset() {
+    prepare_state
+    python3 - "$PRESET" "$RENDERED_PRESET" <<'PY'
+import os
+import pathlib
+import sys
+
+source, destination = map(pathlib.Path, sys.argv[1:])
+text = os.path.expanduser(os.path.expandvars(source.read_text()))
+destination.write_text(text)
+destination.chmod(0o600)
+PY
+}
+
+pid_value() {
+    [[ -f "$PID_FILE" ]] || return 1
+    local pid
+    pid="$(<"$PID_FILE")"
+    [[ "$pid" =~ ^[1-9][0-9]*$ ]] || return 1
+    printf '%s\n' "$pid"
+}
+
+process_matches_router() {
+    local pid="$1" first second
+    local -a process_args=()
+    [[ -r "/proc/$pid/cmdline" ]] || return 1
+    mapfile -d '' -t process_args <"/proc/$pid/cmdline" || true
+    [[ ${#process_args[@]} -gt 0 ]] || return 1
+    first="$(readlink -f "${process_args[0]}" 2>/dev/null || true)"
+    second="${process_args[1]:-}"
+    [[ "$first" == "$(readlink -f "${SERVER_CMD[0]}" 2>/dev/null || true)" ]] || return 1
+    [[ ${#SERVER_CMD[@]} -lt 2 || "$second" == "${SERVER_CMD[1]}" ]]
+}
+
+is_running() {
+    local pid
+    pid="$(pid_value 2>/dev/null)" || return 1
+    kill -0 "$pid" 2>/dev/null && process_matches_router "$pid"
+}
+
+remove_stale_pid() {
+    if [[ -f "$PID_FILE" ]] && ! is_running; then
+        echo "removing stale pid file: $PID_FILE" >&2
+        rm -f -- "$PID_FILE"
+    fi
+}
+
+request() {
+    curl --fail-with-body --silent --show-error --max-time 10 "$@"
+}
+
+endpoint_healthy() {
+    request "$BASE_URL/health" >/dev/null 2>&1
+}
+
+model_state() {
+    request "$BASE_URL/models" | python3 -c '
+import json, sys
+models = json.load(sys.stdin).get("data", [])
+match = next((m for m in models if m.get("id") == sys.argv[1]), None)
+if not match:
+    print("missing")
+else:
+    status = match.get("status", "unknown")
+    print(status.get("value", "unknown") if isinstance(status, dict) else status)
+' "$1"
+}
+
+server_args() {
+    printf '%s\n' --host "$HOST" --port "$PORT" \
+        --models-preset "$RENDERED_PRESET" --models-max "$MODELS_MAX"
+}
+
+show_log_tail() {
+    [[ -f "$LOG_FILE" ]] || return 0
+    echo "--- last 40 server log lines ---" >&2
+    tail -n 40 "$LOG_FILE" >&2
+}
+
+wait_healthy() {
+    local _
+    for _ in $(seq 1 60); do
+        is_running || {
+            echo "router process exited during startup" >&2
+            show_log_tail
+            return 1
+        }
+        endpoint_healthy && return 0
+        sleep 0.5
+    done
+    echo "router did not become healthy in 30 seconds" >&2
+    show_log_tail
+    return 1
+}
+
+post_model() {
+    local action="$1" model="$2" payload
+    payload="$(python3 -c 'import json,sys; print(json.dumps({"model": sys.argv[1]}))' "$model")"
+    request -X POST "$BASE_URL/models/$action" -H 'Content-Type: application/json' -d "$payload"
+    echo
+}
+
+wait_loaded() {
+    local model="$1" state="unknown" _
+    for _ in $(seq 1 240); do
+        state="$(model_state "$model" 2>/dev/null || echo unreachable)"
+        case "$state" in
+            loaded) return 0 ;;
+            error | failed)
+                echo "llm-serve: $model entered state '$state'" >&2
+                show_log_tail
+                return 1
+                ;;
+        esac
+        sleep 0.5
+    done
+    echo "llm-serve: $model did not load in 120 seconds (last state: $state)" >&2
+    show_log_tail
+    return 1
+}
+
+cmd_models() {
+    configured_models
+}
+
+cmd_doctor() {
+    local failed=0 pid="" endpoint="down"
+    validate_host
+    if ! validate_server; then failed=1; fi
+    if ! preset_tool validate; then failed=1; fi
+    prepare_state
+    if is_running; then
+        pid="$(pid_value)"
+    elif [[ -f "$PID_FILE" ]]; then
+        echo "problem: stale or foreign pid file: $PID_FILE" >&2
+        failed=1
+    fi
+    endpoint_healthy && endpoint="healthy"
+    printf 'server: %s\npreset: %s\nstate: %s (mode %s)\nrouter_pid: %s\nendpoint: %s\n' \
+        "${SERVER_CMD[*]}" "$PRESET" "$STATE_DIR" "$(stat -c %a "$STATE_DIR")" \
+        "${pid:-not managed}" "$endpoint"
+    if command -v nvidia-smi >/dev/null 2>&1; then
+        nvidia-smi --query-gpu=name,memory.total,memory.used,memory.free \
+            --format=csv,noheader 2>/dev/null || echo "gpu: nvidia-smi unavailable"
+    fi
+    return "$failed"
+}
+
+cmd_start() {
+    validate_host
+    validate_server || exit 1
+    preset_tool validate >/dev/null
+    prepare_state
+    remove_stale_pid
+    if is_running; then
+        echo "already running on $BASE_URL (pid $(pid_value))"
+        return 0
+    fi
+    endpoint_healthy && die "a healthy unmanaged service already owns $BASE_URL"
+    render_preset
+    mapfile -t args < <(server_args)
+    [[ -f "$LOG_FILE" ]] && mv -f -- "$LOG_FILE" "$PREVIOUS_LOG"
+    nohup "${SERVER_CMD[@]}" "${args[@]}" >"$LOG_FILE" 2>&1 &
+    local pid=$!
+    printf '%s\n' "$pid" >"$PID_FILE"
+    chmod 600 "$PID_FILE" "$LOG_FILE"
+    if ! wait_healthy; then
+        rm -f -- "$PID_FILE"
+        return 1
+    fi
+    echo "router listening on $BASE_URL/v1 (pid $pid)"
+}
+
+cmd_stop() {
+    remove_stale_pid
+    if ! is_running; then
+        echo "not running"
+        return 0
+    fi
+    local pid _
+    pid="$(pid_value)"
+    kill "$pid"
+    for _ in $(seq 1 30); do
+        kill -0 "$pid" 2>/dev/null || break
+        sleep 0.5
+    done
+    if kill -0 "$pid" 2>/dev/null && process_matches_router "$pid"; then
+        kill -9 "$pid"
+    fi
+    rm -f -- "$PID_FILE"
+    echo "stopped"
+}
+
+cmd_status() {
+    remove_stale_pid
+    if ! is_running; then
+        endpoint_healthy && die "endpoint is healthy but is not owned by this pid file"
+        echo "not running"
+        return 1
+    fi
+    echo "router: $BASE_URL/v1 (pid $(pid_value))"
+    local model state
+    while IFS= read -r model; do
+        state="$(model_state "$model" 2>/dev/null || echo unreachable)"
+        printf '  %-10s %s\n' "$state" "$model"
+    done < <(configured_models)
+}
+
+cmd_load() {
+    local model="$1"
+    require_model "$model"
+    is_running || die "router is not running; run 'llm-serve start' first"
+    if [[ "$(model_state "$model")" == "loaded" ]]; then
+        echo "already loaded: $model"
+        return 0
+    fi
+    echo "loading $model"
+    post_model load "$model" >/dev/null
+    wait_loaded "$model"
+    echo "loaded: $model"
+}
+
+cmd_warm() {
+    local models=("$@") model
+    [[ ${#models[@]} -gt 0 ]] || read -r -a models <<<"${LLM_WARM_MODELS:-qwen3.5-4b}"
+    for model in "${models[@]}"; do
+        cmd_load "$model"
+    done
+    cmd_status
+}
+
+case "${1:-}" in
+    doctor) cmd_doctor ;;
+    models) cmd_models ;;
+    start) cmd_start ;;
+    fg)
+        validate_host
+        validate_server || exit 1
+        preset_tool validate >/dev/null
+        render_preset
+        mapfile -t args < <(server_args)
+        exec "${SERVER_CMD[@]}" "${args[@]}"
+        ;;
+    stop) cmd_stop ;;
+    restart) cmd_stop; cmd_start ;;
+    status) cmd_status ;;
+    load)
+        [[ -n "${2:-}" && -z "${3:-}" ]] || { usage >&2; exit 2; }
+        cmd_load "$2"
+        ;;
+    unload)
+        [[ -n "${2:-}" && -z "${3:-}" ]] || { usage >&2; exit 2; }
+        require_model "$2"
+        is_running || die "router is not running; run 'llm-serve start' first"
+        post_model unload "$2"
+        ;;
+    warm) shift; cmd_warm "$@" ;;
+    logs)
+        [[ -f "$LOG_FILE" ]] || die "no server log at $LOG_FILE"
+        tail -n 200 -f "$LOG_FILE"
+        ;;
+    -h | --help | help) usage ;;
+    *) usage >&2; exit 2 ;;
+esac

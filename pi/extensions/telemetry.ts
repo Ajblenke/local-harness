@@ -12,12 +12,13 @@
  */
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { appendFileSync, mkdirSync } from "node:fs";
+import { appendFileSync, chmodSync, mkdirSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 
 const STATE_HOME = process.env.XDG_STATE_HOME ?? join(homedir(), ".local", "state");
 const FILE = join(STATE_HOME, "local-harness", "telemetry.jsonl");
+const RUN_ID = process.env.LOCAL_HARNESS_RUN_ID ?? "";
 
 type Record = { [key: string]: unknown };
 
@@ -32,6 +33,18 @@ function summarizeArgs(tool: string, args: unknown): Record {
   return out;
 }
 
+// pi invalidates an extension's ctx when the session is disposed, and any
+// property read on it then throws. That happens when an RPC client closes stdin
+// mid prompt: pi disposes the session, then the prompt's cleanup still emits
+// agent_settled. Read ctx only through this helper.
+function modelId(ctx: { model?: { id?: string } }): string | undefined {
+  try {
+    return ctx.model?.id;
+  } catch {
+    return undefined;
+  }
+}
+
 function textLength(content: unknown, type: string): number {
   if (!Array.isArray(content)) return 0;
   let n = 0;
@@ -44,25 +57,48 @@ function textLength(content: unknown, type: string): number {
 export default function (pi: ExtensionAPI) {
   let sessionId = "";
   let cwd = "";
+  let sequence = 0;
+  let warned = false;
+  let lastModel: string | undefined;
   const toolStarts = new Map<string, number>();
 
   const write = (record: Record) => {
     try {
-      mkdirSync(dirname(FILE), { recursive: true });
-      appendFileSync(FILE, JSON.stringify({ ts: Date.now(), pid: process.pid, session: sessionId, cwd, ...record }) + "\n");
-    } catch {
-      // Telemetry must never break a session.
+      mkdirSync(dirname(FILE), { recursive: true, mode: 0o700 });
+      chmodSync(dirname(FILE), 0o700);
+      sequence += 1;
+      const envelope = {
+        schema: "local-harness/telemetry/v1",
+        event_id: `${RUN_ID}:${process.pid}:${sessionId}:${sequence}`,
+        ts: Date.now(),
+        pid: process.pid,
+        session: sessionId,
+        run_id: RUN_ID,
+        cwd,
+        ...record,
+      };
+      appendFileSync(FILE, JSON.stringify(envelope) + "\n", { mode: 0o600 });
+      chmodSync(FILE, 0o600);
+    } catch (error) {
+      // Interactive telemetry is best effort, but a controlled runner can now
+      // detect the missing start/settled envelope and refuse to advance.
+      if (!warned) {
+        warned = true;
+        console.error(`[local-harness] telemetry unavailable: ${String(error)}`);
+      }
     }
   };
 
   pi.on("session_start", async (_event, ctx) => {
     sessionId = ctx.sessionManager.getSessionId?.() ?? "";
     cwd = ctx.cwd;
-    write({ event: "session_start", model: ctx.model?.id, provider: ctx.model?.provider, mode: ctx.mode });
+    lastModel = modelId(ctx);
+    write({ event: "session_start", model: lastModel, provider: ctx.model?.provider, mode: ctx.mode });
   });
 
   pi.on("turn_start", async (event, ctx) => {
-    write({ event: "turn_start", turn: event.turnIndex, model: ctx.model?.id });
+    lastModel = modelId(ctx) ?? lastModel;
+    write({ event: "turn_start", turn: event.turnIndex, model: lastModel });
   });
 
   pi.on("turn_end", async (event, ctx) => {
@@ -75,7 +111,7 @@ export default function (pi: ExtensionAPI) {
     write({
       event: "turn_end",
       turn: event.turnIndex,
-      model: ctx.model?.id,
+      model: modelId(ctx) ?? lastModel,
       stop: message?.stopReason,
       tokens: usage ? { input: usage.input, output: usage.output, cacheRead: usage.cacheRead } : undefined,
       textChars: textLength(content, "text"),
@@ -104,10 +140,10 @@ export default function (pi: ExtensionAPI) {
   });
 
   pi.on("after_provider_response", async (event, ctx) => {
-    if (event.status >= 400) write({ event: "provider_error", status: event.status, model: ctx.model?.id });
+    if (event.status >= 400) write({ event: "provider_error", status: event.status, model: modelId(ctx) ?? lastModel });
   });
 
-  pi.on("agent_settled", async (_event, ctx) => {
-    write({ event: "agent_settled", model: ctx.model?.id });
+  pi.on("agent_settled", async () => {
+    write({ event: "agent_settled", model: lastModel });
   });
 }

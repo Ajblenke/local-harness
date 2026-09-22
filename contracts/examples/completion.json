@@ -1,0 +1,25 @@
+{
+  "schema": "local-harness/completion/v1",
+  "run_id": "example-run",
+  "work_order_sha256": "ea8a1aa2225020130060075ab9aa8402b17edb7506432bc235fc4cae44ce6aa4",
+  "agent_id": "example-agent",
+  "status": "completed",
+  "summary": "Added and tested one controller behavior",
+  "changes": [
+    {"path": "harness/controller.py", "kind": "modified"},
+    {"path": "tests/test_controller.py", "kind": "modified"}
+  ],
+  "checks": [
+    {"name": "ruff", "status": "pass"},
+    {"name": "pytest", "status": "pass"}
+  ],
+  "claims": [
+    {
+      "statement": "The controller tests pass",
+      "evidence_refs": ["check:pytest"]
+    }
+  ],
+  "risks": [],
+  "uncertainties": [],
+  "requested_action": "advance"
+}

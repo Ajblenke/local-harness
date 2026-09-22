@@ -1,0 +1,15 @@
+.git
+.env
+**/.env
+.escalate-ok
+secrets
+**/secrets
+.venv
+.pytest_cache
+.ruff_cache
+**/__pycache__
+*.pyc
+*.sqlite3
+*.jsonl
+runs
+reports

@@ -1,0 +1,23 @@
+services:
+  checker:
+    build:
+      context: ..
+      dockerfile: sandbox/Dockerfile
+    entrypoint: []
+    working_dir: /workspace
+    read_only: true
+    user: "${AGENT_UID:-1000}:${AGENT_GID:-1000}"
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    pids_limit: 256
+    mem_limit: 8g
+    cpus: 4
+    network_mode: none
+    tmpfs:
+      - /tmp:size=1g,mode=1777
+    environment:
+      HOME: /home/node
+      UV_CACHE_DIR: /tmp/uv-cache
+      PYTHONDONTWRITEBYTECODE: "1"
+    volumes:
+      - ${WORKTREE:?set WORKTREE}:/workspace:ro

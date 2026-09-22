@@ -1,0 +1,27 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "local-harness/telemetry/v1",
+  "title": "Local Harness Telemetry Event v1",
+  "type": "object",
+  "required": ["schema", "event_id", "ts", "pid", "session", "run_id", "cwd", "event"],
+  "properties": {
+    "schema": {"const": "local-harness/telemetry/v1"},
+    "event_id": {"type": "string", "minLength": 1},
+    "ts": {"type": "integer", "minimum": 0},
+    "pid": {"type": "integer", "minimum": 1},
+    "session": {"type": "string"},
+    "run_id": {"type": "string"},
+    "cwd": {"type": "string"},
+    "event": {
+      "enum": [
+        "session_start",
+        "turn_start",
+        "turn_end",
+        "tool_start",
+        "tool_end",
+        "provider_error",
+        "agent_settled"
+      ]
+    }
+  }
+}

@@ -1,0 +1,65 @@
+services:
+  router:
+    image: ghcr.io/ggml-org/llama.cpp:server-cuda-b10985
+    command:
+      - --model
+      - /models/model.gguf
+      - --alias
+      - qwen3.5-4b
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8080"
+      - --ctx-size
+      - "131072"
+      - --cache-type-k
+      - q8_0
+      - --cache-type-v
+      - q8_0
+      - --n-gpu-layers
+      - "999"
+      - --reasoning-budget
+      - "1024"
+      - --jinja
+      - --metrics
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    pids_limit: 256
+    mem_limit: 8g
+    cpus: 4
+    gpus: all
+    networks: [agent-local]
+    tmpfs:
+      - /tmp:size=1g,mode=1777
+    volumes:
+      - ${MODEL_FILE:?set MODEL_FILE}:/models/model.gguf:ro
+
+  agent:
+    build:
+      context: ..
+      dockerfile: sandbox/Dockerfile
+    read_only: true
+    user: "${AGENT_UID:-1000}:${AGENT_GID:-1000}"
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    pids_limit: 256
+    mem_limit: 8g
+    cpus: 4
+    depends_on: [router]
+    networks: [agent-local]
+    environment:
+      HOME: /home/node
+      XDG_STATE_HOME: /artifacts/state
+      LOCAL_HARNESS_RUN_ID: ${LOCAL_HARNESS_RUN_ID:?set LOCAL_HARNESS_RUN_ID}
+      LOCAL_HARNESS_ROUTER_HEALTH: http://router:8080/health
+      LOCAL_HARNESS_ROUTER_WAIT_SECONDS: "300"
+    tmpfs:
+      - /tmp:size=1g,mode=1777
+    volumes:
+      - ${WORKTREE:?set WORKTREE}:/workspace:rw
+      - ${ARTIFACTS:?set ARTIFACTS}:/artifacts:rw
+
+networks:
+  agent-local:
+    internal: true

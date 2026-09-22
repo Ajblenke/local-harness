@@ -10,3 +10,6 @@ __pycache__/
 
 # pi subagent artifacts, if pi is ever run with artifactDir=project by mistake
 .pi/subagents/
+
+# PRD documents
+docs/dashboard-prd.md

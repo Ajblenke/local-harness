@@ -4,6 +4,8 @@ Goal: pi runs everyday agent work on local models, privately.
 Cloud models handle only hard tasks, through a boundary that keeps logs and transcripts local.
 The system measures its models, shows what every agent is doing, and improves its own context files from audited failures.
 
+The control-loop design and continuation contract live in `docs/control-loop.md`.
+
 Status marks: `[ ]` not started, `[~]` in progress, `[x]` done.
 
 ## Phases
@@ -24,21 +26,22 @@ Status marks: `[ ]` not started, `[~]` in progress, `[x]` done.
 
 ### Phase 2: roles, pi config, telemetry `[~]`
 
-- [x] `~/.pi/agent/models.json` matches the presets (32K); Spark entries removed. The file now lives in `~/dotfiles/pi` and is stowed. Model ids have no slashes (`qwen3.5-4b`, `lfm2.5-2.6b`, `ornith-1.5-9b`, `minicpm5-2b`).
-- [x] `settings.json`: default model `llama-cpp/qwen3.5-4b`; scout and researcher on `lfm2.5-2.6b`; oracle on `ornith-1.5-9b`
+- [~] Replace the malformed live `~/.pi/agent/models.json` with the reviewed local-only 128K template; the installer is ready but the managed workspace cannot write the dotfiles repository.
+- [x] `settings.json`: `defaultProvider` `llama-cpp` and `defaultModel` `qwen3.5-4b` as separate keys; every local role uses Qwen3.5.
 - [x] `~/.pi/agent/extensions/subagent/config.json` symlinked from `pi/extensions/subagent-config.json`: FleetView on, artifacts in the session dir, 10 minute run and 2 minute tool timeouts
 - [x] `pi/extensions/telemetry.ts` symlinked as `~/.pi/agent/extensions/local-harness-telemetry.ts`; verified: turns, tool durations, token counts, 17.7K cached tokens per turn
 - [x] `harness status` shows loaded models, GPU, active runs
-- [ ] Decide which pi extensions a local session keeps (see the prompt cost table) and whether `pi-memory` stays
-- [ ] Verify a delegation end to end once the scout stops leaving the project directory
+- [x] `harness observe` shows telemetry, Git changes, and controller decisions on loopback
+- [x] Extensions for local sessions: pi-subagents, ask-user-question, pi-memory, and pi-fff in override mode (decision 19)
+- [x] Scout moved to Qwen3.5 (decision 20); a delegation now completes end to end in 32 seconds and the scout stays in the project directory
 
-### Phase 3: escalation boundary `[ ]`
+### Phase 3: Gemini escalation boundary `[~]`
 
-- [ ] Claude Code deny rules for `~/.pi`, subagent temp dirs, state dir, vault
-- [ ] Brief template in `briefs/`
-- [ ] `pi/extensions/escalation-guard.ts`: brief required, marker required, scan, confirm
-- [ ] `harness handoff <files...>` for vault work
-- [ ] Smoke test the Claude Code adapters against CLI 2.1.270
+- [x] Fresh-process Bubblewrap boundary excludes `~/.pi`, subagent temp dirs, state, dotfiles, vault, source Git metadata, and the live home directory
+- [x] Generated review brief binds the objective, Gemini model, named files, sizes, and content digests
+- [x] Escalation guard: brief required, marker required, named-file validation, explicit digest confirmation
+- [x] `harness handoff create/run` copies named UTF-8 files and never applies cloud edits automatically
+- [ ] Smoke test a non-sensitive fixture with `GEMINI_API_KEY` and free-tier quota exhaustion
 
 ### Phase 4: audit sensor `[ ]`
 
@@ -46,6 +49,21 @@ Status marks: `[ ]` not started, `[~]` in progress, `[x]` done.
 - [ ] `harness/metrics.py` scores runs
 - [ ] `harness report` lists flagged runs
 - [ ] Thresholds set from a week of real use
+
+### Phase 4A: controller contract `[~]`
+
+- [x] Document set point, sensor, controller, actuator, disturbances, and dampener
+- [x] Version work-order, agent-completion, and runner-observation schemas
+- [x] Version the telemetry envelope and import it incrementally into a private SQLite store
+- [x] `harness contract check` returns `advance`, `double_check`, or `halt`
+- [x] Add durable human feedback for future maintenance sessions
+- [x] Generate runner-owned observations from run-scoped telemetry and Git
+- [x] Load checks from the base commit and execute them in a networkless checker container
+- [x] Require work-order digests, distinct agent/runner identities, complete telemetry, and sandbox evidence
+- [x] Add contract fixtures and document the add-and-migrate rule before introducing v2
+- [x] Display contract decisions and evidence in the local dashboard
+- [x] Add a manual/schedulable one-attempt workflow; keep final acceptance human-controlled
+- [ ] Run and review the first full Docker iteration once Docker is installed
 
 ### Phase 5: context distillation loop `[ ]`
 
@@ -79,6 +97,25 @@ A finetune is adopted only if it scores equal or better on every scenario group.
 | 13 | 2026-09-14 | Scenarios are JSON files, one per group, with canned tool results for multi step cases | A cloud proposal in phase 5 can add a scenario without touching Python |
 | 14 | 2026-09-14 | Context is 32K per model with a q8_0 KV cache (was 8K) | pi's prompt with extensions is 14K to 17K tokens before any conversation; Qwen3.5, MiniCPM5, and LFM2.5 have small per token caches so 32K is affordable |
 | 15 | 2026-09-14 | Qwen3.5-4B is the main model | 11/11 on both scenario groups with thinking on and off, completed a real pi tool task, and keeps its prompt cache across turns; MiniCPM5 looped on the dead end case with thinking on |
+| 16 | 2026-09-15 | Continuation uses three independently bound documents and hard gates, not an agent self-score | A work-order digest, runner observation, immutable check registry, and distinct identities make unsupported claims fail closed |
+| 17 | 2026-09-15 | Agent and local model run in Docker on an internal-only network; checks run in a separate networkless container | This standardizes tools and limits without mounting home, credentials, or the Docker socket and without granting internet egress |
+| 18 | 2026-09-15 | Judge output stays an unweighted vector; adoption starts at three perfect repetitions with no fatal findings | Correctness, reliability, and efficiency are unlike quantities, so one aggregate would hide failures |
+| 19 | 2026-09-15 | Local pi sessions load only pi-subagents, ask-user-question, pi-memory, and pi-fff | Dropping pi-web-access, pi-lens, and pi-mcp-adapter saves about 7K prompt tokens per turn; pi-memory stays because the ACE memory plan builds on it; pi-fff came back on 2026-09-15 in override mode, replacing grep and find instead of adding tools |
+| 20 | 2026-09-15 | The scout runs on Qwen3.5-4B, not LFM2.5 | The LFM scout treated the working directory as `/` and ran an unbounded `find /`; the Qwen3.5 scout ran `ls` in the project directory |
+| 21 | 2026-09-15 | pi settings name the default as `defaultProvider` plus a bare `defaultModel` id | `defaultModel: "llama-cpp/qwen3.5-4b"` matches nothing, and pi silently falls back to the first model in `models.json` (Ornith 9B) |
+| 22 | 2026-09-15 | The router serves two models only, and nothing uses Ornith, including the ACE Reflector and Curator: Qwen3.5-4B for the main session, workers, and scouts, and LFM2.5-2.6B for researchers | Ornith 9B, MiniCPM5, and the Qwen3 finetune loaded on demand and pushed other models out or onto the CPU; two fixed models are predictable |
+| 23 | 2026-09-15 | Qwen3.5 gets a 64K window and LFM2.5 one 32K slot, every layer forced onto the GPU | A vault session hit a 30K prompt and pi clamped the reply to one token. 64K is the largest Qwen window that fits beside LFM; without forcing layers onto the GPU, llama.cpp quietly moved LFM to the CPU (6 tok/s) |
+| 24 | 2026-09-15 | Qwen3.5-4B is the only model; the main session and every subagent use it, and LFM2.5 is removed | Joseph wants the most context for the main agent; one model leaves the whole GPU for its cache |
+| 25 | 2026-09-15 | Qwen3.5 runs with a 160K window | 262K, 229K, and 196K fail to load; 160K uses 7.4 of 8 GiB |
+| 26 | 2026-09-15 | pi auto compaction is off | Compaction rewrites the conversation and throws away the prompt cache; the cache survives a subagent request taking the slot (29,955 of 30,470 tokens reused), so a long uncompacted session stays fast. The 160K window is now a hard session limit |
+| 27 | 2026-09-15 | A session near the context limit hands off to a new session through `/handoff` instead of compacting | The note carries file pointers, decisions, challenges, and next steps, so the new session starts small and keeps what matters; the extension saves the agent's reply because Qwen3.5 skipped the write tool call |
+| 22 | 2026-09-15 | The independent checker gets a read-only worktree and no evidence mount | Candidate tests are executable code; a writable mount would let them rewrite the diff or runner artifacts while supposedly validating them |
+| 23 | 2026-09-15 | A judgeable eval hashes the exact model file itself and captures the evaluator-source digest before its first request | A caller-supplied digest is still a claim, and a model id or Git commit does not identify changed local weights or an uncommitted evaluator |
+| 24 | 2026-09-15 | Each Docker iteration gets a unique Compose project and mandatory teardown evidence | Timing out the Docker client does not prove its containers or router stopped |
+| 25 | 2026-09-15 | The sandbox image copies only explicit runtime inputs and manifests their combined digest | `COPY .` needlessly enlarged the image trust boundary, while Compose-only hashes omitted code and lockfile drift |
+| 26 | 2026-09-15 | Scheduled runs create a unique work order, detached worktree, and evidence root and refuse dirty or overlapping execution | Reusing a concrete loop config would stack mutations and overwrite the evidence needed for human review |
+| 27 | 2026-09-15 | Eval scenarios fail closed on unknown fields and invalid expectation semantics before inference | Valid JSON can still contain a typo that silently removes a scoring requirement |
+| 28 | 2026-09-20 | Restore a local-only 128K Qwen baseline; Gemini remains disabled until a reviewed handoff boundary exists | The 160K cache leaves little VRAM headroom, and switching providers inside a live session would disclose its transcript even when a repository has opted in |
 
 ## Measurements
 
@@ -122,7 +159,34 @@ Prompt cost per extension, on top of the 1,545 baseline:
 | pi-mcp-adapter | 1,040 |
 | @juicesharp/rpiv-ask-user-question | under 100 |
 
+Delegation with Qwen3.5 as main and scout (2026-09-15, all three kept extensions): the scout ran `ls -lh` in the project directory, wrote its context file, and pi exited in 32 seconds.
+The main model relabelled byte sizes as kilobytes (12 bytes reported as 12 KB) after asking the scout for KB.
+That is the second failure card candidate: units lost across a handoff.
+
+Two model fit on the RTX 5060 (2026-09-15, Obsidian holding 0.4 GiB of the GPU):
+
+| Qwen3.5 window | LFM2.5 | GPU in use | Result |
+|---|---|---|---|
+| 131K | two 32K slots | Qwen alone 5.8 GiB | Qwen ran out of memory while LFM was loaded; with LFM loaded second, LFM fell back to the CPU at 6 tok/s |
+| 98K | one 32K slot | 6.0 GiB | LFM could not allocate its cache |
+| 64K | one 32K slot | 7.4 GiB | Qwen 99 tok/s, LFM 181 tok/s. Adopted. |
+
+Qwen3.5 alone (2026-09-15, one slot, q8_0 cache, every layer on the GPU):
+
+| Window | Result |
+|---|---|
+| 262K, 229K, 196K | Failed to load |
+| 160K | 7.4 of 8 GiB. 30K prompt cold in 9.9 s at 71 tok/s; resent, 30,467 cached and 0.3 s; after an unrelated request took the slot, 29,955 cached and 0.5 s. Adopted. |
+
+Handoff test (2026-09-15, RPC mode, threshold lowered to 12.8K, four step task with pytest missing): the warning fired at 12.9K, the note listed the goal, state, files, the pytest failure, and next steps, and the new session read it, switched to unittest as the note suggested, and finished all four steps without handing off again.
+An earlier run with the write tool approach failed because the model printed the note instead of saving it.
+
+Rule for pi test runs: run them in `~/.local/state/local-harness/pi-test/` with `ACE_MEMORY_SKIP=1` set, so test sessions are never queued for ACE reflection and cannot teach the real playbook.
+
 ## Open items
+- Fixed 2026-09-15, uncommitted: the telemetry extension threw a stale ctx error on `agent_settled` when an RPC client closed stdin mid prompt, because pi disposes the session before the prompt's cleanup emits that event.
+  The handler now uses the model id remembered from earlier events.
+- Handoff triggers at contextWindow minus 20K. A single turn that adds more than 20K tokens (a huge tool result) can still reach the window before the check runs.
 
 - Prompt cache on hybrid models: LFM2.5 reuses 0 of 98 cached tokens when only the user message differs, and 94 when the request is identical.
   Hybrid models restore state only at checkpoints, so a stripped `<think>` block in the echoed assistant message also breaks reuse on the next turn.
@@ -133,6 +197,8 @@ Prompt cost per extension, on top of the 1,545 baseline:
 - pi swallows a provider error in print mode: exit 0 with no output when the server rejects the request, and it hangs when the base URL is unreachable or JSON mode is used with this provider. Worth an upstream report.
 - pi clamps `max_completion_tokens` down to 1 instead of failing when the prompt exceeds the configured context window. Also worth an upstream report.
 - pi's extension set costs about 15K prompt tokens per turn on every local model. Decide which extensions a local session actually needs.
-- `pi-memory` keeps `pi -p` alive after any run that used tools: the task finishes in about 40 seconds and the process sits until killed.
-  Every other extension, alone or together, exits cleanly.
-  Until that is fixed or the package is removed, scripted runs need a timeout and delegation tests are unreliable.
+- `pi-memory` appears to write an exit summary with the session model after the answer: the router kept generating on Ornith after pi printed its reply.
+  With Ornith 9B at 2.8 tok/s this looked like a hang; with Qwen3.5 as the default the same delegation exits in 32 seconds.
+  Scripted runs keep a timeout until this is measured over more runs.
+- One pi run with no flags stalled before starting a session and sent nothing to the router, right after a killed run.
+  It did not reproduce on four later runs; watch for it.

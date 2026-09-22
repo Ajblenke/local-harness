@@ -14,19 +14,32 @@ prompt plus what should happen:
                         for up to max_turns, feeding results back
   max_repeat_calls      how many times the same call (tool and args) may repeat
   expect_final_contains substrings the final answer must contain
+  expect_final_contains_any at least one acceptable phrase must appear
 """
 
 from __future__ import annotations
 
+import hashlib
 import json
+import platform
 import re
 import statistics
+import subprocess
 import time
 from pathlib import Path
 from typing import Any
 
-from harness.client import DEFAULT_BASE_URL, AuditedClient, AuditError, read_metrics
+from harness.client import (
+    DEFAULT_BASE_URL,
+    AuditedClient,
+    AuditError,
+    read_metrics,
+    read_model_info,
+    validate_tool_schema,
+)
 from harness.paths import PRESETS_DIR, RUNS_DIR, SCENARIOS_DIR
+from harness.secureio import write_private_json
+from harness.validation import validate_tool_arguments
 
 
 def load_preset(name: str) -> dict[str, Any]:
@@ -39,7 +52,13 @@ def load_preset(name: str) -> dict[str, Any]:
 
 def load_scenarios(names: list[str] | None = None) -> list[dict[str, Any]]:
     files = sorted(SCENARIOS_DIR.glob("*.json"))
-    scenarios = [json.loads(p.read_text()) for p in files]
+    scenarios = []
+    for path in files:
+        scenario = json.loads(path.read_text())
+        problems = validate_scenario(scenario)
+        if problems:
+            raise ValueError(f"{path}: invalid scenario: {'; '.join(problems)}")
+        scenarios.append(scenario)
     if names:
         known = {s["name"] for s in scenarios}
         missing = set(names) - known
@@ -49,6 +68,112 @@ def load_scenarios(names: list[str] | None = None) -> list[dict[str, Any]]:
             )
         scenarios = [s for s in scenarios if s["name"] in names]
     return scenarios
+
+
+def validate_scenario(scenario: Any) -> list[str]:
+    """Validate scenario semantics so misspelled expectations cannot be ignored."""
+    if not isinstance(scenario, dict):
+        return ["scenario must be an object"]
+    problems: list[str] = []
+    top_fields = {"name", "description", "system", "tools", "cases"}
+    unexpected = sorted(set(scenario) - top_fields)
+    if unexpected:
+        problems.append(f"unexpected scenario fields {unexpected}")
+    for key in ("name", "description", "system"):
+        if not isinstance(scenario.get(key), str) or not scenario[key]:
+            problems.append(f"{key} must be a non-empty string")
+    tools = scenario.get("tools")
+    if not isinstance(tools, list) or not tools:
+        problems.append("tools must be a non-empty array")
+        tools = []
+    tool_schemas: dict[str, dict[str, Any]] = {}
+    for index, tool in enumerate(tools):
+        tool_problems = validate_tool_schema(tool)
+        problems.extend(f"tool {index}: {problem}" for problem in tool_problems)
+        if isinstance(tool, dict) and isinstance(tool.get("function"), dict):
+            function = tool["function"]
+            name = function.get("name")
+            if isinstance(name, str):
+                if name in tool_schemas:
+                    problems.append(f"duplicate tool {name!r}")
+                elif isinstance(function.get("parameters"), dict):
+                    tool_schemas[name] = function["parameters"]
+
+    cases = scenario.get("cases")
+    if not isinstance(cases, list) or not cases:
+        problems.append("cases must be a non-empty array")
+        return problems
+    allowed_case_fields = {
+        "name",
+        "prompt",
+        "tool_results",
+        "expect_calls",
+        "allow_extra_calls",
+        "max_turns",
+        "max_repeat_calls",
+        "expect_final_contains",
+        "expect_final_contains_any",
+    }
+    names: set[str] = set()
+    for index, case in enumerate(cases):
+        prefix = f"case {index}"
+        if not isinstance(case, dict):
+            problems.append(f"{prefix} must be an object")
+            continue
+        unexpected = sorted(set(case) - allowed_case_fields)
+        if unexpected:
+            problems.append(f"{prefix}: unexpected fields {unexpected}")
+        name = case.get("name")
+        if not isinstance(name, str) or not name:
+            problems.append(f"{prefix}: name must be a non-empty string")
+        elif name in names:
+            problems.append(f"{prefix}: duplicate name {name!r}")
+        else:
+            names.add(name)
+        if not isinstance(case.get("prompt"), str) or not case["prompt"]:
+            problems.append(f"{prefix}: prompt must be a non-empty string")
+        calls = case.get("expect_calls")
+        if not isinstance(calls, list):
+            problems.append(f"{prefix}: expect_calls must be an array")
+            calls = []
+        for call_index, call in enumerate(calls):
+            call_prefix = f"{prefix} call {call_index}"
+            if not isinstance(call, dict) or set(call) != {"tool", "args"}:
+                problems.append(f"{call_prefix}: expected exactly tool and args")
+                continue
+            tool_name, arguments = call.get("tool"), call.get("args")
+            if tool_name not in tool_schemas:
+                problems.append(f"{call_prefix}: unknown tool {tool_name!r}")
+                continue
+            if not isinstance(arguments, dict):
+                problems.append(f"{call_prefix}: args must be an object")
+                continue
+            properties = tool_schemas[tool_name].get("properties", {})
+            for key, value in arguments.items():
+                if key not in properties:
+                    problems.append(f"{call_prefix}: unknown argument {key!r}")
+                else:
+                    problems.extend(
+                        f"{call_prefix}: {problem}"
+                        for problem in validate_tool_arguments(value, properties[key], f"$.{key}")
+                    )
+        for key in ("allow_extra_calls", "expect_final_contains", "expect_final_contains_any"):
+            values = case.get(key, [])
+            if not isinstance(values, list) or not all(isinstance(value, str) and value for value in values):
+                problems.append(f"{prefix}: {key} must be a string array")
+        for tool_name in case.get("allow_extra_calls", []):
+            if tool_name not in tool_schemas:
+                problems.append(f"{prefix}: unknown allowed tool {tool_name!r}")
+        results = case.get("tool_results", {})
+        if not isinstance(results, dict) or not all(
+            name in tool_schemas and isinstance(value, str) for name, value in results.items()
+        ):
+            problems.append(f"{prefix}: tool_results must map known tools to strings")
+        for key in ("max_turns", "max_repeat_calls"):
+            value = case.get(key, 1)
+            if not isinstance(value, int) or isinstance(value, bool) or value < 1:
+                problems.append(f"{prefix}: {key} must be a positive integer")
+    return problems
 
 
 def _arg_mismatches(want: dict[str, Any], got: dict[str, Any] | None) -> list[str]:
@@ -108,6 +233,9 @@ def _score(case: dict[str, Any], calls: list[dict[str, Any]], final: str | None)
         missing = [n for n in needles if n.lower() not in text]
         if missing:
             return False, f"final answer lacks {missing}"
+    alternatives = case.get("expect_final_contains_any", [])
+    if alternatives and not any(value.lower() in (final or "").lower() for value in alternatives):
+        return False, f"final answer lacks any of {alternatives}"
     return True, ""
 
 
@@ -129,11 +257,23 @@ def run_case(
     for turn_no in range(max_turns):
         try:
             turn = client.complete(
-                messages, tools=scenario["tools"], expect_tool_call=(turn_no == 0 and expects_tool), **params
+                messages,
+                tools=scenario["tools"],
+                expect_tool_call=(turn_no == 0 and expects_tool),
+                conversation_turn=turn_no + 1,
+                **params,
             )
         except AuditError as exc:
             return result | {"passed": False, "reason": str(exc), "turns": len(turns)}
         turns.append(turn)
+        fatal_findings = [str(finding) for finding in turn.findings if finding.fatal]
+        if fatal_findings:
+            return result | {
+                "passed": False,
+                "reason": "; ".join(fatal_findings),
+                "turns": len(turns),
+                "findings": [str(finding) for item in turns for finding in item.findings],
+            }
         messages.append(turn.message)
         if not turn.tool_calls:
             final = turn.content
@@ -179,6 +319,48 @@ def _slug(text: str) -> str:
     return re.sub(r"[^A-Za-z0-9.]+", "-", text).strip("-")
 
 
+def _digest(value: Any) -> str:
+    encoded = json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _git_commit() -> str | None:
+    try:
+        return subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=Path(__file__).resolve().parent.parent,
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=True,
+        ).stdout.strip()
+    except (OSError, subprocess.SubprocessError):
+        return None
+
+
+def _source_digest() -> str:
+    root = Path(__file__).resolve().parent.parent
+    files = [*sorted((root / "harness").glob("*.py")), *sorted((root / "evals").rglob("*.json"))]
+    files.extend(path for path in (root / "pyproject.toml", root / "uv.lock") if path.is_file())
+    digest = hashlib.sha256()
+    for path in files:
+        digest.update(path.relative_to(root).as_posix().encode())
+        digest.update(b"\0")
+        digest.update(path.read_bytes())
+        digest.update(b"\0")
+    return digest.hexdigest()
+
+
+def _file_sha256(path: Path) -> str:
+    if not path.is_file():
+        raise ValueError(f"model artifact is not a regular file: {path}")
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for block in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
 def run_eval(
     model: str,
     preset: str,
@@ -186,7 +368,38 @@ def run_eval(
     base_url: str = DEFAULT_BASE_URL,
     label: str = "",
     save: bool = True,
+    repeat: int = 1,
+    model_sha256: str | None = None,
+    model_file: Path | None = None,
 ) -> dict[str, Any]:
+    if repeat < 1:
+        raise ValueError("repeat must be at least 1")
+    if model_sha256 is not None and not re.fullmatch(r"[a-f0-9]{64}", model_sha256):
+        raise ValueError("model_sha256 must be 64 lowercase hexadecimal characters")
+    if model_file is not None and model_sha256 is not None:
+        raise ValueError("provide model_file or model_sha256, not both")
+
+    initial_model_info = read_model_info(base_url, model)
+    if not initial_model_info:
+        raise AuditError(
+            f"model {model!r} is not listed by {base_url}/models; "
+            "run `llm-serve doctor`, `llm-serve models`, and `llm-serve start` first"
+        )
+    initial_status = initial_model_info.get("status")
+    initial_status = initial_status.get("value") if isinstance(initial_status, dict) else initial_status
+    if initial_status in {"error", "failed"}:
+        raise AuditError(f"model {model!r} is already in router state {initial_status!r}")
+
+    if model_file is not None:
+        model_sha256 = _file_sha256(model_file)
+        model_identity_source = "hashed_file"
+    else:
+        model_identity_source = "operator_attested" if model_sha256 else "missing"
+
+    # Capture identity before the first request. A concurrent edit during a long
+    # evaluation must not be presented as the source that produced earlier turns.
+    harness_commit = _git_commit()
+    harness_source_sha256 = _source_digest()
     params = load_preset(preset)
     scenarios = load_scenarios(scenario_names)
     client = AuditedClient(model=model, base_url=base_url)
@@ -195,10 +408,25 @@ def run_eval(
 
     per_scenario = []
     for scenario in scenarios:
-        results = [run_case(client, scenario, case, params) for case in scenario["cases"]]
+        results = []
+        for repetition in range(1, repeat + 1):
+            for case in scenario["cases"]:
+                result = run_case(client, scenario, case, params)
+                result["repetition"] = repetition
+                results.append(result)
         per_scenario.append({"name": scenario["name"], "results": results})
 
     after = read_metrics(base_url, model)
+    model_info = read_model_info(base_url, model)
+    server_model_path = model_info.get("path")
+    server_status = model_info.get("status")
+    server_status = server_status.get("value") if isinstance(server_status, dict) else None
+    model_path_matches = bool(
+        model_file is not None
+        and isinstance(server_model_path, str)
+        and Path(server_model_path).is_absolute()
+        and Path(server_model_path).resolve() == model_file.resolve()
+    )
     all_results = [r for s in per_scenario for r in s["results"]]
     passed = sum(r["passed"] for r in all_results)
     summary: dict[str, Any] = {
@@ -208,6 +436,21 @@ def run_eval(
         "params": params,
         "label": label,
         "trace_id": client.trace_id,
+        "repeat": repeat,
+        "manifest": {
+            "harness_commit": harness_commit,
+            "harness_source_sha256": harness_source_sha256,
+            "model_sha256": model_sha256,
+            "model_identity_source": model_identity_source,
+            "server_model_path": server_model_path,
+            "server_model_status": server_status,
+            "server_model_path_matches": model_path_matches,
+            "python": platform.python_version(),
+            "platform": platform.platform(),
+            "preset_sha256": _digest(params),
+            "scenarios_sha256": _digest(scenarios),
+            "base_url": base_url,
+        },
         "passed": passed,
         "total": len(all_results),
         "score": round(passed / len(all_results), 3) if all_results else 0.0,
@@ -220,10 +463,11 @@ def run_eval(
         summary["tokens_predicted"] = after.get(key, 0) - before.get(key, 0)
 
     if save:
-        RUNS_DIR.mkdir(parents=True, exist_ok=True)
         stamp = time.strftime("%Y%m%dT%H%M%S", time.localtime(started))
-        path = RUNS_DIR / f"{stamp}_{_slug(model)}_{preset}{'_' + _slug(label) if label else ''}.json"
-        path.write_text(json.dumps(summary, indent=2) + "\n")
+        path = RUNS_DIR / (
+            f"{stamp}_{client.trace_id}_{_slug(model)}_{preset}{'_' + _slug(label) if label else ''}.json"
+        )
+        write_private_json(path, summary)
         summary["path"] = str(path)
     return summary
 
@@ -257,7 +501,8 @@ def format_run(summary: dict[str, Any]) -> str:
         width = max(len(r["name"]) for r in scenario["results"])
         for r in scenario["results"]:
             mark = " ok " if r["passed"] else "FAIL"
-            line = f"    [{mark}] {r['name']:<{width}}  {r.get('tok_per_s', 0):>6} tok/s"
+            repetition = f" r{r['repetition']}" if summary.get("repeat", 1) > 1 else ""
+            line = f"    [{mark}] {r['name']:<{width}}{repetition}  {r.get('tok_per_s', 0):>6} tok/s"
             if r.get("reasoning_chars"):
                 line += f"  think {r['reasoning_chars']}ch"
             if not r["passed"]:
@@ -280,7 +525,11 @@ def format_run(summary: dict[str, Any]) -> str:
 
 def format_compare(a: dict[str, Any], b: dict[str, Any]) -> str:
     def flat(run: dict[str, Any]) -> dict[str, dict[str, Any]]:
-        return {f"{s['name']}/{r['name']}": r for s in run["scenarios"] for r in s["results"]}
+        return {
+            f"{s['name']}/{r['name']}#r{r.get('repetition', 1)}": r
+            for s in run["scenarios"]
+            for r in s["results"]
+        }
 
     fa, fb = flat(a), flat(b)
     names = sorted(set(fa) | set(fb))

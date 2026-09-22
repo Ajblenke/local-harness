@@ -14,6 +14,9 @@ The checks exist because each of these failures returns HTTP 200:
 from __future__ import annotations
 
 import json
+import math
+import os
+import re
 import time
 import urllib.error
 import urllib.parse
@@ -24,6 +27,7 @@ from pathlib import Path
 from typing import Any
 
 from harness.paths import STATE_DIR
+from harness.validation import validate_tool_arguments
 
 DEFAULT_BASE_URL = "http://127.0.0.1:8080"
 DEFAULT_LOG = STATE_DIR / "turns.jsonl"
@@ -149,6 +153,8 @@ def validate_tool_schema(tool: dict[str, Any]) -> list[str]:
     warning, and merely makes the tool harder for the model to call correctly.
     """
     problems: list[str] = []
+    if not isinstance(tool, dict):
+        return [f"tool is not an object: {tool!r:.120}"]
     fn = tool.get("function")
     if tool.get("type") != "function" or not isinstance(fn, dict):
         return [f"tool is not a well formed function entry: {tool!r:.120}"]
@@ -163,22 +169,61 @@ def validate_tool_schema(tool: dict[str, Any]) -> list[str]:
         return problems
     if not isinstance(params, dict):
         return problems + [f"{fn.get('name')}: parameters is not an object"]
+    if params.get("type") != "object":
+        problems.append(f"{fn.get('name')}: parameter root must have type 'object'")
 
     def walk(node: Any, path: str) -> None:
         if not isinstance(node, dict):
+            problems.append(f"{fn.get('name')}{path}: schema node is not an object")
             return
         t = node.get("type")
-        if isinstance(t, str) and t not in valid:
+        if t is not None and not isinstance(t, str):
+            problems.append(f"{fn.get('name')}{path}: type must be a string")
+        elif isinstance(t, str) and t not in valid:
             problems.append(f"{fn.get('name')}{path}: invalid JSON Schema type {t!r}")
-        for key, child in (node.get("properties") or {}).items():
+        properties = node.get("properties", {})
+        if not isinstance(properties, dict):
+            problems.append(f"{fn.get('name')}{path}: properties must be an object")
+            properties = {}
+        for key, child in properties.items():
+            if not isinstance(key, str) or not key:
+                problems.append(f"{fn.get('name')}{path}: property names must be non-empty strings")
+                continue
             walk(child, f"{path}.{key}")
-        if isinstance(node.get("items"), dict):
+        required = node.get("required", [])
+        if not isinstance(required, list) or not all(isinstance(name, str) for name in required):
+            problems.append(f"{fn.get('name')}{path}: required must be a string array")
+        else:
+            for name in required:
+                if name not in properties:
+                    problems.append(f"{fn.get('name')}{path}: required field {name!r} is not in properties")
+        if "enum" in node and not isinstance(node["enum"], list):
+            problems.append(f"{fn.get('name')}{path}: enum must be an array")
+        for keyword in ("minLength", "maxLength", "minItems", "maxItems"):
+            value = node.get(keyword)
+            if value is not None and (not isinstance(value, int) or isinstance(value, bool) or value < 0):
+                problems.append(f"{fn.get('name')}{path}: {keyword} must be a non-negative integer")
+        for keyword in ("minimum", "maximum"):
+            value = node.get(keyword)
+            if value is not None and (
+                not isinstance(value, (int, float)) or isinstance(value, bool) or not math.isfinite(value)
+            ):
+                problems.append(f"{fn.get('name')}{path}: {keyword} must be a finite number")
+        pattern = node.get("pattern")
+        if pattern is not None:
+            if not isinstance(pattern, str):
+                problems.append(f"{fn.get('name')}{path}: pattern must be a string")
+            else:
+                try:
+                    re.compile(pattern)
+                except re.error as exc:
+                    problems.append(f"{fn.get('name')}{path}: invalid pattern ({exc})")
+        if "items" in node and not isinstance(node["items"], dict):
+            problems.append(f"{fn.get('name')}{path}: items must be an object")
+        elif isinstance(node.get("items"), dict):
             walk(node["items"], f"{path}[]")
 
     walk(params, "")
-    for name in params.get("required", []) or []:
-        if name not in (params.get("properties") or {}):
-            problems.append(f"{fn.get('name')}: required field {name!r} is not in properties")
     return problems
 
 
@@ -200,7 +245,12 @@ class AuditedClient:
         self.turn_index = 0
         self.log_path = log_path
         if log_path is not None:
-            log_path.parent.mkdir(parents=True, exist_ok=True)
+            if log_path.is_symlink():
+                raise ValueError(f"refusing symbolic-link audit log: {log_path}")
+            parent_existed = log_path.parent.exists()
+            log_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+            if not parent_existed or log_path == DEFAULT_LOG:
+                os.chmod(log_path.parent, 0o700)
 
     def _chat_format(self) -> str | None:
         """Read the parser the server actually chose, from /slots.
@@ -222,6 +272,7 @@ class AuditedClient:
         messages: list[dict[str, Any]],
         tools: list[dict[str, Any]] | None = None,
         expect_tool_call: bool = False,
+        conversation_turn: int | None = None,
         **params: Any,
     ) -> Turn:
         self.turn_index += 1
@@ -229,6 +280,8 @@ class AuditedClient:
         schema_problems: list[str] = []
         for tool in tools or []:
             schema_problems.extend(validate_tool_schema(tool))
+        if schema_problems:
+            raise AuditError("invalid tool schema: " + "; ".join(schema_problems))
 
         payload: dict[str, Any] = {"model": self.model, "messages": messages, **params}
         if tools:
@@ -242,7 +295,11 @@ class AuditedClient:
         message = choice.get("message") or {}
         usage = raw.get("usage") or {}
         timings = raw.get("timings") or {}
-        offered = {t["function"]["name"] for t in (tools or []) if t.get("function", {}).get("name")}
+        offered = {
+            t["function"]["name"]: t["function"].get("parameters", {})
+            for t in (tools or [])
+            if t.get("function", {}).get("name")
+        }
 
         turn = Turn(
             trace_id=self.trace_id,
@@ -264,16 +321,25 @@ class AuditedClient:
             chat_format=self._chat_format(),
         )
 
-        for problem in schema_problems:
-            turn.findings.append(Finding("tool_schema", problem, fatal=True))
-        self._check(turn, offered, expect_tool_call)
+        self._check(turn, offered, expect_tool_call, conversation_turn)
 
         if self.log_path is not None:
-            with self.log_path.open("a") as fh:
+            flags = os.O_APPEND | os.O_CREAT | os.O_WRONLY
+            if hasattr(os, "O_NOFOLLOW"):
+                flags |= os.O_NOFOLLOW
+            descriptor = os.open(self.log_path, flags, 0o600)
+            with os.fdopen(descriptor, "a") as fh:
+                os.fchmod(fh.fileno(), 0o600)
                 fh.write(json.dumps(turn.as_record()) + "\n")
         return turn
 
-    def _check(self, turn: Turn, offered: set[str], expect_tool_call: bool) -> None:
+    def _check(
+        self,
+        turn: Turn,
+        offered: dict[str, dict[str, Any]],
+        expect_tool_call: bool,
+        conversation_turn: int | None,
+    ) -> None:
         add = turn.findings.append
 
         # Budget starvation. Verified: a strict json_schema request returned
@@ -301,6 +367,9 @@ class AuditedClient:
                 args = json.loads(fn.get("arguments") or "{}")
                 if not isinstance(args, dict):
                     add(Finding("tool_arguments", f"{name}: arguments are not an object", fatal=True))
+                elif name in offered:
+                    for problem in validate_tool_arguments(args, offered[name]):
+                        add(Finding("tool_arguments", f"{name}: {problem}", fatal=True))
             except json.JSONDecodeError as exc:
                 add(Finding("tool_arguments", f"{name}: arguments are not valid JSON ({exc})", fatal=True))
 
@@ -319,11 +388,13 @@ class AuditedClient:
             )
 
         # Prompt cache. The largest performance lever in an agent loop.
-        if turn.turn_index > 1 and turn.cached_tokens == 0 and turn.prompt_tokens > 64:
+        turn_in_conversation = conversation_turn or turn.turn_index
+        if turn_in_conversation > 1 and turn.cached_tokens == 0 and turn.prompt_tokens > 64:
             add(
                 Finding(
                     "prompt_cache",
-                    f"no cache reuse on turn {turn.turn_index} ({turn.prompt_tokens} prompt tokens). "
+                    f"no cache reuse on conversation turn {turn_in_conversation} "
+                    f"({turn.prompt_tokens} prompt tokens). "
                     f"Something is perturbing the prefix, often a timestamp or per turn id near the top",
                     fatal=False,
                 )
@@ -350,3 +421,14 @@ def read_metrics(base_url: str = DEFAULT_BASE_URL, model: str | None = None) -> 
         except ValueError:
             continue
     return out
+
+
+def read_model_info(base_url: str, model: str) -> dict[str, Any]:
+    """Return this model's router record, including its source path and load status."""
+    response = _get(f"{base_url}/models")
+    if not isinstance(response, dict) or not isinstance(response.get("data"), list):
+        return {}
+    for item in response["data"]:
+        if isinstance(item, dict) and item.get("id") == model:
+            return item
+    return {}

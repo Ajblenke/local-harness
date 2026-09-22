@@ -1,0 +1,5 @@
+{
+  "defaultProvider": "llama-cpp",
+  "defaultModel": "qwen3.5-4b",
+  "defaultProjectTrust": "always"
+}

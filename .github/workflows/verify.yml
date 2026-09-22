@@ -32,6 +32,7 @@ jobs:
       - name: Validate sandbox definitions
         env:
           WORKTREE: /tmp/local-harness-worktree
+          ARTIFACTS: /tmp/local-harness-artifacts
           MODEL_FILE: /tmp/local-harness-model.gguf
           LOCAL_HARNESS_RUN_ID: verify
         run: |

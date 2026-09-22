@@ -176,8 +176,7 @@ def create_handoff(
     manifest = core | {"confirmation": confirmation}
     write_private_json(destination / "manifest.json", manifest)
     inventory = "\n".join(
-        f"- `{entry['path']}` ({entry['bytes']} bytes, sha256 `{entry['sha256']}`)"
-        for entry in entries
+        f"- `{entry['path']}` ({entry['bytes']} bytes, sha256 `{entry['sha256']}`)" for entry in entries
     )
     brief = (
         "# Gemini handoff review\n\n"

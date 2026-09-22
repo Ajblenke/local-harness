@@ -16,8 +16,7 @@ def test_local_model_configs_share_context_and_contain_no_cloud_credentials():
     assert parser.getint("qwen3.5-4b", "c") == EXPECTED_CONTEXT
     assert set(pi_models["providers"]) == {"llama-cpp"}
     pi_contexts = {
-        model["id"]: model["contextWindow"]
-        for model in pi_models["providers"]["llama-cpp"]["models"]
+        model["id"]: model["contextWindow"] for model in pi_models["providers"]["llama-cpp"]["models"]
     }
     assert pi_contexts == {"qwen3.5-4b": EXPECTED_CONTEXT, "minicpm5-2b": 32768}
     assert parser.getint("minicpm5-2b", "c") == 32768

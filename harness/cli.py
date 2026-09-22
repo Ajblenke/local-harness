@@ -304,9 +304,7 @@ def cmd_handoff_create(args: argparse.Namespace) -> int:
     print(f"created {destination}")
     print(f"review {destination / 'brief.md'}")
     print("run exactly once after review:")
-    print(
-        f"uv run harness handoff run {destination} --confirm {manifest['confirmation']}"
-    )
+    print(f"uv run harness handoff run {destination} --confirm {manifest['confirmation']}")
     return 0
 
 

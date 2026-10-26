@@ -1,5 +1,63 @@
 # Plan
 
+## Coordination hub planning
+
+As of 2026-10-26, this repo will also be Joseph's starting point for work across projects.
+Joseph starts an agent here and points it to the directory where the work belongs.
+Target projects keep their code in their own repositories.
+This repo will own shared orchestration rules, teammate definitions, project memory organization, Herdr workflows, and agent collaboration rules.
+The application will be designed for Joseph's workflow, with [Firstmate](https://github.com/kunchenguid/firstmate/tree/main) as a reference.
+
+The primary agent acts as Joseph's chief of staff and is a dedicated coordinator.
+It clarifies requests, plans work, assigns teammates through Herdr, monitors progress, reviews results, and brings decisions and outcomes back to Joseph.
+Teammates make target project changes; the chief of staff delegates those changes.
+Within an objective's agreed scope, the chief of staff chooses teammates, assigns work, and requests revisions autonomously.
+It brings scope changes and consequential decisions to Joseph.
+
+Teammates are persistent named specialists with stable responsibilities and curated memory.
+Each assignment starts a fresh teammate session.
+Teammate continuity comes from their definitions and curated memory rather than an ongoing conversation.
+The team combines functional specialists with project owners.
+Each project has a project specific reviewer whose review criteria evolve with the project.
+The reviewer must use a stronger model than the model that generated the work.
+The capability ordering and the policy for work that requires the strongest available generator remain open.
+Token efficiency during development is a design requirement.
+
+The chief of staff communicates with Joseph in Standard Technical English (STE) by default.
+Joseph wants a local classifier running in the background to categorize work by the model capability level it needs.
+The specified trainable source is the base [Laya](https://huggingface.co/convaiinnovations/laya) checkpoint.
+The proposed training approach uses a synthetic dataset for development task routing.
+Initial task routing selects among cloud model capability levels.
+Local worker models are deferred until the coordination harness works; the local classifier remains part of the intended routing design.
+Routing categories, training details, runtime resource costs, and adoption criteria remain to be defined.
+Atelier is the preferred naming direction; the exact project name remains open.
+Joseph describes the application as a fleet management system for organizing work and executing it at scale.
+Development of this repo will use GitHub issues and pull requests.
+Separate components may be developed independently; their boundaries remain to be designed.
+Users can choose the workflow pattern used to tackle an objective.
+The application must provide a place to visualize workflows.
+Before execution, the chief of staff recommends a workflow pattern, explains why it fits, and presents a visualization for Joseph to confirm or change.
+Each workflow pattern has a reference file that defines how the chief of staff orchestrates it.
+The reference file format and its relationship to executable workflow definitions remain to be designed.
+The initial visualization supports inspecting the proposed workflow and configuring teammates and model capability levels before approval.
+During execution, it shows progress and blockers.
+Editing the workflow graph visually is outside the initial visualization scope.
+The workflow view will be a local web dashboard, delivered later as a low priority addition.
+Initial workflow recommendation and confirmation happen through the chief of staff conversation, with Herdr hosting agent terminals.
+The dashboard's visual proposal presentation is deferred until that addition is built.
+Plugin design is deferred.
+The current priority is the project skeleton for the chief of staff, teammate definitions, project context, workflow references, and Herdr coordination.
+The reference catalog is the [archived Smithers patterns site](https://web.archive.org/web/20260810154704/https://patterns.smithers.sh/).
+The reference could not be retrieved during the initial inspection; its specific patterns have not been evaluated.
+The initial pattern catalog and the scope of customization beyond teammate and model selection remain open.
+
+The selected initial implementation is instructions plus a thin runtime.
+The skeleton on feat/atelier-skeleton establishes role and workflow references, proposal storage and approval, and Herdr agent inspection.
+Automated dispatch and execution tracking remain a later slice.
+The design interview continues for the remaining runtime behavior.
+Open decisions include the boundary of consequential decisions, teammate roster, project context loading, memory ownership, work isolation, and how the existing local model workflow fits the hub.
+The goal and phases below describe the existing local model work and remain available while that relationship is decided.
+
 Goal: pi runs everyday agent work on local models, privately.
 Cloud models handle only hard tasks, through a boundary that keeps logs and transcripts local.
 The system measures its models, shows what every agent is doing, and improves its own context files from audited failures.

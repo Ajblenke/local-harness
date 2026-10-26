@@ -1,4 +1,45 @@
-# local-harness
+# Atelier (working name)
+
+Atelier is becoming a home base for coordinating work across project repositories through Herdr.
+Start an agent here as your chief of staff, then give it an objective and a target directory.
+Read [docs/architecture.md](docs/architecture.md) for the skeleton and its current limits.
+
+The initial CLI records workflow proposals and approvals:
+
+```sh
+uv run atelier workflow
+uv run atelier propose /absolute/path/to/proposal.json
+uv run atelier show <proposal-id>
+uv run atelier approve <proposal-id>
+uv run atelier agents
+```
+
+Run approve after confirming the proposed workflow with Joseph.
+The agents command requires a Herdr managed pane.
+Dispatch and execution tracking are currently performed by the chief of staff through Herdr.
+The CLI does not launch agents yet.
+
+A proposal JSON file has this shape; replace paths and model IDs with the actual project configuration:
+
+```json
+{
+  "objective": "Implement the scoped change",
+  "acceptance_criteria": "Project checks pass and project review accepts the change",
+  "project": "/absolute/path/to/project",
+  "review_criteria": "/absolute/path/to/project-review.md",
+  "workflow": "worker-review",
+  "worker": "worker",
+  "reviewer": "project-reviewer",
+  "generator_model": {"id": "chosen-generator", "rank": 1},
+  "reviewer_model": {"id": "chosen-reviewer", "rank": 2}
+}
+```
+
+Capability ranks come from the project's agreed model ordering.
+The reviewer must be a different model with a higher rank.
+Proposals are stored outside the repo under `~/.local/state/atelier/`, respecting `XDG_STATE_HOME`.
+
+## Existing local model tools
 
 Runs pi on local models, measures how they behave, and audits what the agents do.
 Cloud models are used only for hard tasks, and they never see logs, transcripts, or the vault.

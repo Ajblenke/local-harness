@@ -9,6 +9,8 @@ import shutil
 import subprocess
 import time
 import uuid
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
@@ -21,9 +23,12 @@ from harness.controller import (
 )
 from harness.observer import load_check_registry, observe
 from harness.paths import REPO_DIR, STATE_DIR
-from harness.sandbox import render_prompt, run_agent
+from harness.runlog import append_event, recover_schedule
+from harness.sandbox import compose_project_name, render_prompt, run_agent
 from harness.secureio import write_private, write_private_json
 from harness.telemetry import TELEMETRY_DB, sync
+
+SCHEDULE_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 
 
 def _private_dir(path: Path) -> None:
@@ -45,8 +50,13 @@ def run_iteration(
     artifacts: Path,
     model: str = "llama-cpp/qwen3.5-4b",
     memory: Path | None = None,
+    run_log: Path | None = None,
 ) -> Decision:
-    """Run exactly one mutation attempt; never retry automatically."""
+    """Run exactly one mutation attempt; never retry automatically.
+
+    With ``run_log`` (a scheduled run's root), each step is recorded in its append-only
+    run log so a later invocation can recover the run if this process dies.
+    """
     work = load_document(work_order)
     problems = validate_work_order(work)
     if problems:
@@ -62,7 +72,13 @@ def run_iteration(
     prompt = artifacts / "prompt.md"
     write_private(prompt, render_prompt(work_order, memory))
 
+    def record(event: str, **data: Any) -> None:
+        if run_log is not None:
+            append_event(run_log, work["run_id"], event, **data)
+
+    record("actuator_started", compose_project=compose_project_name(work["run_id"]))
     exit_code = run_agent(work_copy, prompt, worktree, agent_artifacts, model)
+    record("actuator_exited", exit_code=exit_code)
     _write_json(work_copy, work)
     observation_path = artifacts / "observation.json"
     observation = observe(
@@ -74,6 +90,7 @@ def run_iteration(
         sandbox_manifest=agent_artifacts / "sandbox-manifest.json",
         runner_events=agent_artifacts / "runner-events.jsonl",
     )
+    record("observed", observation_sha256=document_sha256(observation))
     completion_path = agent_artifacts / "completion.json"
     if completion_path.is_symlink():
         decision = Decision(
@@ -103,6 +120,7 @@ def run_iteration(
             "artifact_dir": str(artifacts.resolve()),
         },
     )
+    record("decided", outcome=decision.outcome)
     return decision
 
 
@@ -153,7 +171,7 @@ def run_scheduled(path: Path) -> tuple[Decision, Path]:
         if key in config and (not isinstance(config[key], str) or not config[key]):
             raise ValueError(f"scheduled {key} must be a non-empty string")
     schedule_id = config.get("schedule_id", path.stem)
-    if not isinstance(schedule_id, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}", schedule_id):
+    if not isinstance(schedule_id, str) or not SCHEDULE_ID_PATTERN.fullmatch(schedule_id):
         raise ValueError("scheduled schedule_id is unsafe")
     limits = {
         "min_changed_files": 1,
@@ -168,65 +186,70 @@ def run_scheduled(path: Path) -> tuple[Decision, Path]:
 
     schedule_root = STATE_DIR / "scheduled" / schedule_id
     _private_dir(schedule_root)
-    lock_path = schedule_root / "active.lock"
-    lock_descriptor = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
+    with _schedule_lock(schedule_root, schedule_id):
+        # The lock proves no other invocation owns a run here, so any run whose log
+        # has not ended was interrupted. Repair it before issuing new work.
+        recover_schedule(schedule_root)
+        return _run_scheduled_locked(config, schedule_id, schedule_root, limits)
+
+
+def _run_scheduled_locked(
+    config: dict[str, Any], schedule_id: str, schedule_root: Path, limits: dict[str, int]
+) -> tuple[Decision, Path]:
+    status = subprocess.run(
+        ["git", "status", "--porcelain"],
+        cwd=REPO_DIR,
+        capture_output=True,
+        text=True,
+        check=True,
+        timeout=10,
+    ).stdout
+    if status:
+        raise RuntimeError("scheduled loop requires a clean primary checkout")
+    base_commit = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=REPO_DIR,
+        capture_output=True,
+        text=True,
+        check=True,
+        timeout=10,
+    ).stdout.strip()
+    checks = list(dict.fromkeys(config.get("checks", ["ruff", "pytest"])))
+    registry = load_check_registry(base_commit, REPO_DIR)
+    missing_checks = sorted(set(checks) - set(registry))
+    if missing_checks:
+        raise ValueError(f"scheduled checks are not registered at {base_commit}: {missing_checks}")
+    run_id = f"{schedule_id}-{time.strftime('%Y%m%dT%H%M%S')}-{uuid.uuid4().hex[:8]}"
+    work = {
+        "schema": "local-harness/work-order/v1",
+        "run_id": run_id,
+        "objective": config["objective"],
+        "base_commit": base_commit,
+        "scope": {
+            "read": ["**"],
+            "write": list(dict.fromkeys(config["write"])),
+            "deny": list(
+                dict.fromkeys([".env", "**/.env", "secrets/**", "**/secrets/**", *config.get("deny", [])])
+            ),
+        },
+        "required_checks": checks,
+        "limits": limits,
+        "approval": "human",
+        "next_step": config.get("next_step", "present the verified change for human review"),
+    }
+    problems = validate_work_order(work)
+    if problems:
+        raise ValueError("invalid scheduled work order: " + "; ".join(problems))
+
+    run_root = schedule_root / run_id
+    _private_dir(run_root)
+    append_event(run_root, run_id, "issued", base_commit=base_commit, work_order_sha256=document_sha256(work))
+    work_order = run_root / "work-order.json"
+    worktree = run_root / "worktree"
+    evidence = run_root / "evidence"
     try:
-        try:
-            fcntl.flock(lock_descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError as exc:
-            raise RuntimeError(f"scheduled loop {schedule_id!r} is already active") from exc
-
-        status = subprocess.run(
-            ["git", "status", "--porcelain"],
-            cwd=REPO_DIR,
-            capture_output=True,
-            text=True,
-            check=True,
-            timeout=10,
-        ).stdout
-        if status:
-            raise RuntimeError("scheduled loop requires a clean primary checkout")
-        base_commit = subprocess.run(
-            ["git", "rev-parse", "HEAD"],
-            cwd=REPO_DIR,
-            capture_output=True,
-            text=True,
-            check=True,
-            timeout=10,
-        ).stdout.strip()
-        checks = list(dict.fromkeys(config.get("checks", ["ruff", "pytest"])))
-        registry = load_check_registry(base_commit, REPO_DIR)
-        missing_checks = sorted(set(checks) - set(registry))
-        if missing_checks:
-            raise ValueError(f"scheduled checks are not registered at {base_commit}: {missing_checks}")
-        run_id = f"{schedule_id}-{time.strftime('%Y%m%dT%H%M%S')}-{uuid.uuid4().hex[:8]}"
-        work = {
-            "schema": "local-harness/work-order/v1",
-            "run_id": run_id,
-            "objective": config["objective"],
-            "base_commit": base_commit,
-            "scope": {
-                "read": ["**"],
-                "write": list(dict.fromkeys(config["write"])),
-                "deny": list(
-                    dict.fromkeys([".env", "**/.env", "secrets/**", "**/secrets/**", *config.get("deny", [])])
-                ),
-            },
-            "required_checks": checks,
-            "limits": limits,
-            "approval": "human",
-            "next_step": config.get("next_step", "present the verified change for human review"),
-        }
-        problems = validate_work_order(work)
-        if problems:
-            raise ValueError("invalid scheduled work order: " + "; ".join(problems))
-
-        run_root = schedule_root / run_id
-        _private_dir(run_root)
-        work_order = run_root / "work-order.json"
         write_private_json(work_order, work)
         write_private(run_root / "work-order.sha256", document_sha256(work) + "\n")
-        worktree = run_root / "worktree"
         subprocess.run(
             ["git", "worktree", "add", "--detach", str(worktree), base_commit],
             cwd=REPO_DIR,
@@ -235,31 +258,67 @@ def run_scheduled(path: Path) -> tuple[Decision, Path]:
             check=True,
             timeout=60,
         )
-        evidence = run_root / "evidence"
-        try:
-            decision = run_iteration(
-                work_order,
-                worktree,
-                evidence,
-                config.get("model", "llama-cpp/qwen3.5-4b"),
-                Path(config["memory"]) if config.get("memory") else None,
-            )
-        except Exception as exc:
-            write_private_json(
-                run_root / "schedule-result.json",
-                {
-                    "outcome": "double_check",
-                    "reasons": [f"scheduled iteration failed: {exc}"],
-                    "run_id": run_id,
-                    "worktree": str(worktree),
-                    "evidence": str(evidence),
-                },
-            )
-            raise
+        append_event(run_root, run_id, "worktree_created")
+        decision = run_iteration(
+            work_order,
+            worktree,
+            evidence,
+            config.get("model", "llama-cpp/qwen3.5-4b"),
+            Path(config["memory"]) if config.get("memory") else None,
+            run_log=run_root,
+        )
+    except Exception as exc:
         write_private_json(
             run_root / "schedule-result.json",
-            decision.as_dict() | {"run_id": run_id, "worktree": str(worktree), "evidence": str(evidence)},
+            {
+                "outcome": "double_check",
+                "reasons": [f"scheduled iteration failed: {exc}"],
+                "run_id": run_id,
+                "worktree": str(worktree),
+                "evidence": str(evidence),
+            },
         )
-        return decision, run_root
+        append_event(run_root, run_id, "failed", reason=str(exc)[-2000:])
+        raise
+    write_private_json(
+        run_root / "schedule-result.json",
+        decision.as_dict() | {"run_id": run_id, "worktree": str(worktree), "evidence": str(evidence)},
+    )
+    append_event(run_root, run_id, "completed", outcome=decision.outcome)
+    return decision, run_root
+
+
+@contextmanager
+def _schedule_lock(schedule_root: Path, schedule_id: str) -> Iterator[None]:
+    lock_path = schedule_root / "active.lock"
+    lock_descriptor = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
+    try:
+        try:
+            fcntl.flock(lock_descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as exc:
+            raise RuntimeError(f"scheduled loop {schedule_id!r} is already active") from exc
+        yield
     finally:
         os.close(lock_descriptor)
+
+
+def recover_scheduled(schedule_id: str | None = None) -> dict[str, Any]:
+    """Recover interrupted runs in one schedule, or in every schedule that is not active."""
+    root = STATE_DIR / "scheduled"
+    if schedule_id is not None:
+        if not SCHEDULE_ID_PATTERN.fullmatch(schedule_id):
+            raise ValueError("scheduled schedule_id is unsafe")
+        candidates = [root / schedule_id]
+    else:
+        candidates = sorted(path for path in root.iterdir() if path.is_dir()) if root.is_dir() else []
+    recovered: list[dict[str, Any]] = []
+    skipped: list[str] = []
+    for schedule_root in candidates:
+        if schedule_root.is_symlink() or not schedule_root.is_dir():
+            continue
+        try:
+            with _schedule_lock(schedule_root, schedule_root.name):
+                recovered.extend(recover_schedule(schedule_root))
+        except RuntimeError:
+            skipped.append(schedule_root.name)
+    return {"recovered": recovered, "skipped_active": skipped}

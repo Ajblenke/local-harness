@@ -25,7 +25,7 @@ from harness.sandbox import render_prompt, run_agent
 from harness.secureio import write_private, write_private_json
 from harness.telemetry import TELEMETRY_DB, TELEMETRY_LOG, snapshot, sync
 from harness.telemetry import serve as serve_telemetry
-from harness.workflow import run_config, run_iteration, run_scheduled
+from harness.workflow import recover_scheduled, run_config, run_iteration, run_scheduled
 
 
 def cmd_eval(args: argparse.Namespace) -> int:
@@ -294,6 +294,12 @@ def cmd_loop_scheduled(args: argparse.Namespace) -> int:
     return {"advance": 0, "double_check": 2, "halt": 3}[decision.outcome]
 
 
+def cmd_loop_recover(args: argparse.Namespace) -> int:
+    report = recover_scheduled(args.schedule_id)
+    print(json.dumps(report, indent=2))
+    return 0
+
+
 def cmd_handoff_create(args: argparse.Namespace) -> int:
     destination, manifest = create_handoff(
         args.objective,
@@ -449,6 +455,11 @@ def main(argv: list[str] | None = None) -> int:
     )
     scheduled.add_argument("config")
     scheduled.set_defaults(func=cmd_loop_scheduled)
+    recover = loop_sub.add_parser(
+        "recover", help="mark or finish scheduled runs a crash left unfinished (skips active schedules)"
+    )
+    recover.add_argument("--schedule-id", help="recover one schedule (default: every schedule)")
+    recover.set_defaults(func=cmd_loop_recover)
 
     p = sub.add_parser("handoff", help="create or run an explicitly approved Gemini handoff")
     handoff_sub = p.add_subparsers(dest="handoff_command", required=True)

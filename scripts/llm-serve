@@ -286,10 +286,13 @@ cmd_start() {
     render_preset
     mapfile -t args < <(server_args)
     [[ -f "$LOG_FILE" ]] && mv -f -- "$LOG_FILE" "$PREVIOUS_LOG"
+    # Create the log before the background job opens it, so chmod cannot race the redirect.
+    : >"$LOG_FILE"
+    chmod 600 "$LOG_FILE"
     nohup "${SERVER_CMD[@]}" "${args[@]}" >"$LOG_FILE" 2>&1 &
     local pid=$!
     printf '%s\n' "$pid" >"$PID_FILE"
-    chmod 600 "$PID_FILE" "$LOG_FILE"
+    chmod 600 "$PID_FILE"
     if ! wait_healthy; then
         rm -f -- "$PID_FILE"
         return 1

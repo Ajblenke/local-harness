@@ -5,7 +5,8 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from harness.controller import Decision, document_sha256
-from harness.workflow import _write_json, run_config, run_iteration, run_scheduled
+from harness.runlog import append_event, read_events
+from harness.workflow import _write_json, recover_scheduled, run_config, run_iteration, run_scheduled
 
 
 def test_decision_artifact_is_private(tmp_path: Path):
@@ -207,13 +208,14 @@ def test_scheduled_loop_issues_unique_work_order_and_worktree(tmp_path: Path, mo
 
     captured = {}
 
-    def fake_iteration(work_order, worktree, evidence, model, memory):
+    def fake_iteration(work_order, worktree, evidence, model, memory, run_log=None):
         captured.update(
             work=json.loads(work_order.read_text()),
             worktree=worktree,
             evidence=evidence,
             model=model,
             memory=memory,
+            run_log=run_log,
         )
         return Decision("advance", ())
 
@@ -231,6 +233,12 @@ def test_scheduled_loop_issues_unique_work_order_and_worktree(tmp_path: Path, mo
     assert captured["evidence"].parent == run_root
     assert json.loads((run_root / "schedule-result.json").read_text())["outcome"] == "advance"
     assert any(command[1:3] == ["worktree", "add"] for command in calls)
+    assert captured["run_log"] == run_root
+    records, invalid = read_events(run_root)
+    assert invalid == 0
+    assert [record["event"] for record in records] == ["issued", "worktree_created", "completed"]
+    assert records[0]["data"]["work_order_sha256"] == document_sha256(captured["work"])
+    assert records[-1]["data"]["outcome"] == "advance"
 
 
 def test_scheduled_loop_refuses_dirty_primary_checkout(tmp_path: Path, monkeypatch):
@@ -267,3 +275,84 @@ def test_scheduled_loop_refuses_overlapping_invocation(tmp_path: Path, monkeypat
             raise AssertionError("overlapping scheduled invocation was accepted")
     finally:
         os.close(descriptor)
+
+
+def _scheduled_fakes(tmp_path: Path, monkeypatch, iteration):
+    config = tmp_path / "maintenance.json"
+    config.write_text(json.dumps({"objective": "scheduled task", "write": ["harness/**"]}))
+    repo = tmp_path / "repo"
+    repo.mkdir()
+
+    def fake_subprocess(command, **_kwargs):
+        if command[1:3] == ["status", "--porcelain"]:
+            return SimpleNamespace(stdout="")
+        if command[1:3] == ["rev-parse", "HEAD"]:
+            return SimpleNamespace(stdout="a" * 40 + "\n")
+        if command[1:3] == ["worktree", "add"]:
+            Path(command[-2]).mkdir(parents=True)
+            return SimpleNamespace(stdout="")
+        raise AssertionError(command)
+
+    monkeypatch.setattr("harness.workflow.STATE_DIR", tmp_path / "state")
+    monkeypatch.setattr("harness.workflow.REPO_DIR", repo)
+    monkeypatch.setattr("harness.workflow.subprocess.run", fake_subprocess)
+    monkeypatch.setattr("harness.workflow.load_check_registry", lambda *_args: {"ruff": [], "pytest": []})
+    monkeypatch.setattr("harness.workflow.run_iteration", iteration)
+    return config
+
+
+def test_scheduled_failure_is_journaled_as_terminal(tmp_path: Path, monkeypatch):
+    def failing_iteration(*_args, **_kwargs):
+        raise RuntimeError("actuator unavailable")
+
+    config = _scheduled_fakes(tmp_path, monkeypatch, failing_iteration)
+    try:
+        run_scheduled(config)
+    except RuntimeError as exc:
+        assert "actuator unavailable" in str(exc)
+    else:
+        raise AssertionError("scheduled failure was swallowed")
+    schedule_root = tmp_path / "state" / "scheduled" / "maintenance"
+    (run_root,) = [path for path in schedule_root.iterdir() if path.is_dir()]
+    records, _invalid = read_events(run_root)
+    assert [record["event"] for record in records] == ["issued", "worktree_created", "failed"]
+    assert json.loads((run_root / "schedule-result.json").read_text())["outcome"] == "double_check"
+
+
+def test_scheduled_loop_recovers_interrupted_run_before_issuing_new_work(tmp_path: Path, monkeypatch):
+    config = _scheduled_fakes(tmp_path, monkeypatch, lambda *_args, **_kwargs: Decision("advance", ()))
+    stale = tmp_path / "state" / "scheduled" / "maintenance" / "maintenance-20260101T000000-deadbeef"
+    stale.mkdir(parents=True)
+    append_event(stale, stale.name, "issued")
+    append_event(stale, stale.name, "worktree_created")
+    (stale / "worktree").mkdir()
+
+    _decision, run_root = run_scheduled(config)
+
+    assert run_root != stale
+    records, _invalid = read_events(stale)
+    assert records[-1]["event"] == "abandoned"
+    assert records[-1]["data"]["after"] == "worktree_created"
+    result = json.loads((stale / "schedule-result.json").read_text())
+    assert result["outcome"] == "double_check" and result["recovered"] is True
+    assert (stale / "worktree").is_dir(), "recovery must preserve candidate worktrees"
+
+
+def test_recover_scheduled_skips_active_schedule(tmp_path: Path, monkeypatch):
+    monkeypatch.setattr("harness.workflow.STATE_DIR", tmp_path / "state")
+    active = tmp_path / "state" / "scheduled" / "busy"
+    run_root = active / "busy-20260101T000000-deadbeef"
+    run_root.mkdir(parents=True)
+    append_event(run_root, run_root.name, "issued")
+    descriptor = os.open(active / "active.lock", os.O_CREAT | os.O_RDWR, 0o600)
+    try:
+        fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        report = recover_scheduled()
+    finally:
+        os.close(descriptor)
+    assert report == {"recovered": [], "skipped_active": ["busy"]}
+    assert read_events(run_root)[0][-1]["event"] == "issued"
+
+    report = recover_scheduled("busy")
+    assert [item["run_id"] for item in report["recovered"]] == [run_root.name]
+    assert read_events(run_root)[0][-1]["event"] == "abandoned"

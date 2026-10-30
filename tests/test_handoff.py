@@ -19,6 +19,20 @@ def opted_in_repo(tmp_path: Path) -> Path:
     return repo
 
 
+@pytest.fixture
+def fake_tools(monkeypatch):
+    """Pretend bwrap and pi are installed in /usr/bin without touching the real filesystem."""
+    monkeypatch.setattr("harness.handoff.shutil.which", lambda name: f"/usr/bin/{name}")
+    real_resolve = Path.resolve
+
+    def resolve(self, strict=False):
+        if self.parent == Path("/usr/bin"):
+            return self
+        return real_resolve(self, strict=strict)
+
+    monkeypatch.setattr(Path, "resolve", resolve)
+
+
 def test_create_handoff_copies_only_named_text_with_private_permissions(tmp_path: Path):
     repo = opted_in_repo(tmp_path)
     destination, manifest = create_handoff(
@@ -54,10 +68,9 @@ def test_create_handoff_requires_opt_in_and_rejects_secrets_and_symlinks(tmp_pat
         create_handoff("review", ["link.py"], cwd=repo, output=tmp_path / "three")
 
 
-def test_build_command_disables_context_and_shell_and_mounts_only_copy(tmp_path: Path, monkeypatch):
+def test_build_command_disables_context_and_shell_and_mounts_only_copy(tmp_path: Path, fake_tools):
     workspace = tmp_path / "workspace"
     workspace.mkdir()
-    monkeypatch.setattr("harness.handoff.shutil.which", lambda name: f"/usr/bin/{name}")
 
     command = build_command(workspace, "gemini-2.5-flash")
 
@@ -72,7 +85,7 @@ def test_build_command_disables_context_and_shell_and_mounts_only_copy(tmp_path:
     assert "GEMINI_API_KEY" not in command
 
 
-def test_run_handoff_requires_digest_and_invokes_gemini_once(tmp_path: Path, monkeypatch):
+def test_run_handoff_requires_digest_and_invokes_gemini_once(tmp_path: Path, monkeypatch, fake_tools):
     repo = opted_in_repo(tmp_path)
     destination, manifest = create_handoff(
         "Review this function",
@@ -81,7 +94,6 @@ def test_run_handoff_requires_digest_and_invokes_gemini_once(tmp_path: Path, mon
         output=tmp_path / "handoff",
     )
     monkeypatch.setenv("GEMINI_API_KEY", "test-secret")
-    monkeypatch.setattr("harness.handoff.shutil.which", lambda name: f"/usr/bin/{name}")
     calls = []
 
     def fake_run(command, **kwargs):
@@ -122,7 +134,7 @@ def test_run_rejects_workspace_changed_after_review(tmp_path: Path, monkeypatch)
         run_handoff(destination, manifest["confirmation"])
 
 
-def test_api_key_is_not_persisted(tmp_path: Path, monkeypatch):
+def test_api_key_is_not_persisted(tmp_path: Path, monkeypatch, fake_tools):
     repo = opted_in_repo(tmp_path)
     destination, manifest = create_handoff(
         "Review this function",
@@ -131,7 +143,6 @@ def test_api_key_is_not_persisted(tmp_path: Path, monkeypatch):
         output=tmp_path / "handoff",
     )
     monkeypatch.setenv("GEMINI_API_KEY", "never-write-this-value")
-    monkeypatch.setattr("harness.handoff.shutil.which", lambda name: f"/usr/bin/{name}")
     monkeypatch.setattr(
         "harness.handoff.subprocess.run",
         lambda *_args, **_kwargs: SimpleNamespace(returncode=0, stdout="ok", stderr=""),

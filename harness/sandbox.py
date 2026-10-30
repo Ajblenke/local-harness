@@ -9,11 +9,11 @@ import shutil
 import subprocess
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, TextIO
 
 from harness.controller import document_sha256, load_document, validate_work_order
 from harness.paths import REPO_DIR
-from harness.secureio import write_private, write_private_json
+from harness.secureio import write_private_json
 
 COMPOSE_FILE = REPO_DIR / "sandbox" / "compose.yaml"
 CHECKER_COMPOSE_FILE = REPO_DIR / "sandbox" / "checker.compose.yaml"
@@ -262,6 +262,49 @@ def validate_worktree(work_order: Path, worktree: Path, artifacts: Path) -> None
         raise ValueError("MODEL_FILE must name the GGUF mounted into the local router")
 
 
+def _open_stream(path: Path) -> TextIO:
+    """Open a private, append-only evidence file, refusing a planted symbolic link."""
+    descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_APPEND | os.O_NOFOLLOW, 0o600)
+    os.fchmod(descriptor, 0o600)
+    return os.fdopen(descriptor, "a")
+
+
+def _run_streaming(
+    command: list[str],
+    environment: dict[str, str],
+    stdin: str,
+    stdout_stream: TextIO,
+    stderr_stream: TextIO,
+    timeout: float,
+) -> int:
+    """Run the actuator with its output redirected to files; return its exit code."""
+    try:
+        process = subprocess.Popen(
+            command,
+            cwd=REPO_DIR,
+            env=environment,
+            stdin=subprocess.PIPE,
+            stdout=stdout_stream,
+            stderr=stderr_stream,
+            text=True,
+        )
+    except OSError as exc:
+        stderr_stream.write(f"local-harness: could not start actuator: {exc}\n")
+        return 127
+    try:
+        process.communicate(input=stdin, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        process.wait()
+        stderr_stream.write("\nlocal-harness: actuator exceeded wall-time limit\n")
+        return 124
+    except BaseException:
+        process.kill()
+        process.wait()
+        raise
+    return process.returncode
+
+
 def run_agent(
     work_order: Path,
     prompt_file: Path,
@@ -275,67 +318,59 @@ def run_agent(
     validate_worktree(work_order, worktree, artifacts)
     work = load_document(work_order)
     command, environment, stdin = agent_command(work_order, prompt_file, worktree, artifacts, model)
+    events = artifacts / "runner-events.jsonl"
+    stderr_path = artifacts / "agent-stderr.txt"
+    parent_existed = artifacts.exists()
+    artifacts.mkdir(parents=True, exist_ok=True, mode=0o700)
+    if not parent_existed:
+        os.chmod(artifacts, 0o700)
     started = time.monotonic()
     cleanup_exit_code = 1
-    try:
+    # Stream the actuator's output straight to evidence files so a crash of this
+    # process mid-run still leaves every event emitted so far on disk.
+    with _open_stream(events) as stdout_stream, _open_stream(stderr_path) as stderr_stream:
         try:
-            result = subprocess.run(
+            exit_code = _run_streaming(
                 command,
-                cwd=REPO_DIR,
-                env=os.environ | environment,
-                input=stdin,
-                capture_output=True,
-                text=True,
-                timeout=work["limits"]["max_wall_seconds"],
+                os.environ | environment,
+                stdin,
+                stdout_stream,
+                stderr_stream,
+                work["limits"]["max_wall_seconds"],
             )
-            stdout, stderr, exit_code = result.stdout, result.stderr, result.returncode
-        except subprocess.TimeoutExpired as exc:
-            stdout = (
-                exc.stdout.decode(errors="replace") if isinstance(exc.stdout, bytes) else exc.stdout or ""
-            )
-            stderr = (
-                exc.stderr.decode(errors="replace") if isinstance(exc.stderr, bytes) else exc.stderr or ""
-            )
-            stderr += "\nlocal-harness: actuator exceeded wall-time limit\n"
-            exit_code = 124
-        except OSError as exc:
-            stdout = ""
-            stderr = f"local-harness: could not start actuator: {exc}\n"
-            exit_code = 127
-    finally:
-        try:
-            cleanup = subprocess.run(
-                [
-                    "docker",
-                    "compose",
-                    "--project-name",
-                    compose_project_name(work["run_id"]),
-                    "-f",
-                    str(COMPOSE_FILE),
-                    "down",
-                    "--remove-orphans",
-                ],
-                cwd=REPO_DIR,
-                env=os.environ | environment,
-                capture_output=True,
-                text=True,
-                timeout=60,
-            )
-            cleanup_exit_code = cleanup.returncode
-            cleanup_detail = cleanup.stderr or cleanup.stdout
-        except subprocess.TimeoutExpired as exc:
-            cleanup_exit_code = 124
-            cleanup_detail = str(exc)
-        except OSError as exc:
-            cleanup_exit_code = 127
-            cleanup_detail = str(exc)
-        if cleanup_exit_code:
-            stderr = (locals().get("stderr") or "") + "\nlocal-harness cleanup failed:\n" + cleanup_detail
+        finally:
+            try:
+                cleanup = subprocess.run(
+                    [
+                        "docker",
+                        "compose",
+                        "--project-name",
+                        compose_project_name(work["run_id"]),
+                        "-f",
+                        str(COMPOSE_FILE),
+                        "down",
+                        "--remove-orphans",
+                    ],
+                    cwd=REPO_DIR,
+                    env=os.environ | environment,
+                    capture_output=True,
+                    text=True,
+                    timeout=60,
+                )
+                cleanup_exit_code = cleanup.returncode
+                cleanup_detail = cleanup.stderr or cleanup.stdout
+            except subprocess.TimeoutExpired as exc:
+                cleanup_exit_code = 124
+                cleanup_detail = str(exc)
+            except OSError as exc:
+                cleanup_exit_code = 127
+                cleanup_detail = str(exc)
+            if cleanup_exit_code:
+                stderr_stream.write("\nlocal-harness cleanup failed:\n" + cleanup_detail)
+            for stream in (stdout_stream, stderr_stream):
+                stream.flush()
+                os.fsync(stream.fileno())
     wall_seconds = round(time.monotonic() - started, 3)
-    events = artifacts / "runner-events.jsonl"
-    write_private(events, stdout)
-    stderr_path = artifacts / "agent-stderr.txt"
-    write_private(stderr_path, stderr)
     write_manifest(
         artifacts,
         command,

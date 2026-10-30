@@ -157,7 +157,12 @@ Recurring runs use `harness loop scheduled TEMPLATE`, not a reused concrete loop
 requires a clean primary checkout and creates a unique work order, detached worktree, and evidence root.
 See `systemd/README.md`; keep the mutation timer disabled until a manual Docker pilot is reviewed.
 
-See `docs/control-loop.md`, `docs/scorecard.md`, `docs/independent-review.md`, and `sandbox/README.md` for the
+Each scheduled run keeps an append-only, fsynced `run-log.jsonl`, and the actuator's events stream to
+disk while it runs. The next invocation of the same schedule (or `harness loop recover`) tears down a
+crashed run's Compose project and marks the run `double_check` without retrying or deleting its
+worktree. See `docs/durable-run-log.md`.
+
+See `docs/control-loop.md`, `docs/durable-run-log.md`, `docs/scorecard.md`, `docs/independent-review.md`, and `sandbox/README.md` for the
 trust model, the independent findings, and remaining limits.
 
 ## Where data lives

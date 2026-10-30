@@ -23,8 +23,18 @@ def write_private(path: Path, content: str) -> None:
             os.fsync(stream.fileno())
         temporary_path.chmod(0o600)
         os.replace(temporary_path, path)
+        fsync_directory(path.parent)
     finally:
         temporary_path.unlink(missing_ok=True)
+
+
+def fsync_directory(path: Path) -> None:
+    """Persist a rename or a new entry in ``path`` across power loss."""
+    descriptor = os.open(path, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
 
 
 def write_private_json(path: Path, value: dict[str, Any]) -> None:
